@@ -1,0 +1,172 @@
+{
+  "feature_names": [
+    "mw_numeric_mid",
+    "log_mw",
+    "mw_quality_flag",
+    "lat",
+    "lon",
+    "iso_PJM",
+    "iso_ERCOT",
+    "iso_CAISO",
+    "iso_MROW",
+    "iso_NonISO_SE",
+    "iso_NYISO",
+    "iso_Other",
+    "egrid_RFCE",
+    "egrid_RFCW",
+    "egrid_ERCT",
+    "egrid_MROW",
+    "egrid_CAMX",
+    "egrid_SRSO",
+    "egrid_SRVC",
+    "egrid_SRMV",
+    "egrid_NWPP",
+    "egrid_Other",
+    "co2_intensity_lb_per_mwh",
+    "grid_coal_pct",
+    "grid_gas_pct",
+    "grid_nuclear_pct",
+    "nearest_echo_distance_miles",
+    "nearest_echo_dc_naics_within_1mi",
+    "local_dc_count_25mi",
+    "local_proposed_count_25mi",
+    "local_operating_count_25mi",
+    "local_cancelled_count_25mi",
+    "local_approval_rate_25mi",
+    "log_pollution_cost",
+    "pollution_cost_per_mw",
+    "mw_x_is_PJM",
+    "pollution_x_local_cancelled"
+  ],
+  "model_params": {
+    "objective": "survival:aft",
+    "eval_metric": "aft-nloglik",
+    "aft_loss_distribution": "normal",
+    "aft_loss_distribution_scale": 1.2,
+    "tree_method": "hist",
+    "learning_rate": 0.05,
+    "max_depth": 5,
+    "min_child_weight": 5,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "verbosity": 1
+  },
+  "best_iteration": 67,
+  "val_fraction": 0.2,
+  "random_seed": 42,
+  "n_train": 388,
+  "n_val": 97,
+  "n_train_approved": 153,
+  "n_val_approved": 38,
+  "metrics": {
+    "c_index_train": 0.8911249501487867,
+    "c_index_val": 0.6499522445081184,
+    "mae_days_val_uncensored": 916.6748083014237,
+    "mae_months_val_uncensored": 30.11662614542665,
+    "log1p_mae_val_uncensored": 1.6938297410803362,
+    "median_pred_val": 808.2469482421875,
+    "median_actual_val": 188.5
+  },
+  "top_features_by_gain": [
+    [
+      "grid_nuclear_pct",
+      28.01321792602539
+    ],
+    [
+      "co2_intensity_lb_per_mwh",
+      6.9125237464904785
+    ],
+    [
+      "pollution_cost_per_mw",
+      5.202456951141357
+    ],
+    [
+      "nearest_echo_dc_naics_within_1mi",
+      4.741415977478027
+    ],
+    [
+      "mw_quality_flag",
+      4.438077926635742
+    ],
+    [
+      "local_operating_count_25mi",
+      4.423574447631836
+    ],
+    [
+      "grid_coal_pct",
+      4.3132781982421875
+    ],
+    [
+      "mw_numeric_mid",
+      4.271548748016357
+    ],
+    [
+      "local_approval_rate_25mi",
+      4.212554454803467
+    ],
+    [
+      "egrid_RFCW",
+      3.9942307472229004
+    ],
+    [
+      "nearest_echo_distance_miles",
+      3.8258049488067627
+    ],
+    [
+      "log_mw",
+      3.796165943145752
+    ],
+    [
+      "log_pollution_cost",
+      3.7921934127807617
+    ],
+    [
+      "iso_PJM",
+      3.33988881111145
+    ],
+    [
+      "local_proposed_count_25mi",
+      3.306344509124756
+    ],
+    [
+      "local_dc_count_25mi",
+      3.301739454269409
+    ],
+    [
+      "lon",
+      3.202991247177124
+    ],
+    [
+      "lat",
+      3.150070905685425
+    ],
+    [
+      "local_cancelled_count_25mi",
+      3.089545488357544
+    ],
+    [
+      "grid_gas_pct",
+      3.0008349418640137
+    ],
+    [
+      "iso_ERCOT",
+      2.8238143920898438
+    ],
+    [
+      "pollution_x_local_cancelled",
+      2.802746534347534
+    ],
+    [
+      "mw_x_is_PJM",
+      2.783550977706909
+    ],
+    [
+      "egrid_Other",
+      2.4049324989318848
+    ],
+    [
+      "egrid_RFCE",
+      1.66748046875
+    ]
+  ]
+}
