@@ -35,6 +35,7 @@ import openpyxl
 
 ROOT = Path(__file__).parent
 EGRID_PATH = ROOT / "echo_bulk" / "egrid2023.xlsx"
+EGRID_URL = "https://www.epa.gov/system/files/documents/2025-01/egrid2023_data_rev1.xlsx"
 
 # ----- Defaults (override via kwargs) -----
 DEFAULT_UTILIZATION = 0.75   # mean IT load fraction over the year (DCs run hot)
@@ -75,11 +76,13 @@ _RESOURCE_MIX_CODES = {
 
 def _open_egrid() -> openpyxl.Workbook:
     if not EGRID_PATH.exists():
-        raise FileNotFoundError(
-            f"eGRID workbook not found at {EGRID_PATH}.\n"
-            "Download via: curl -o {EGRID_PATH} "
-            "https://www.epa.gov/system/files/documents/2025-01/egrid2023_data_rev1.xlsx"
-        )
+        import sys
+        import urllib.request
+        EGRID_PATH.parent.mkdir(parents=True, exist_ok=True)
+        print(f"[eGRID] file missing — downloading {EGRID_URL} → {EGRID_PATH} (~21MB)",
+              file=sys.stderr)
+        urllib.request.urlretrieve(EGRID_URL, EGRID_PATH)
+        print(f"[eGRID] saved {EGRID_PATH.stat().st_size/1e6:.0f} MB", file=sys.stderr)
     return openpyxl.load_workbook(str(EGRID_PATH), read_only=True, data_only=True)
 
 
