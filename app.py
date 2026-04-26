@@ -2,25 +2,40 @@ from flask import Flask, request, jsonify
 import pandas as pd
 import jax.numpy as jnp
 
-from center.pollution import datacenter_pollution
+from pollution import datacenter_pollution  # noqa: F401  (kept for any downstream imports)
 from data import CobraData
 from compute import Compute
 from util import prepare_emissions
 
 app = Flask(__name__)
 
+# SOURCEINDX(1..N) → FIPS, ordered by SOURCEINDX so it aligns with the per-county result vector.
+_counties = pd.read_json("data/counties.json").sort_values("SOURCEINDX")
+COUNTY_FIPS = [f"{int(f):05d}" for f in _counties["FIPS"].tolist()]
+COUNTY_NAMES = [f"{r.CYNAME}, {r.STNAME}" for r in _counties.itertuples()]
+
 
 @app.post("/compute")
 def compute_effects():
-    lat = request.json["lat"]
-    lon = request.json["lon"]
-    total_power = request.json["total_power"]
-    generator_power = request.json["generator_power"]
-    generator_is_diesel = request.json["fuel"] == "Diesel"
+    payload = request.json or {}
+    lat = payload["lat"]
+    lon = payload["lon"]
+    total_power = payload["total_power"]
+    generators = payload.get("generators")
 
-    data, base_emissions, modified_emissions = prepare_emissions(
-        lat, lon, total_power, generator_power, generator_is_diesel
-    )
+    if generators:
+        data, base_emissions, modified_emissions = prepare_emissions(
+            lat, lon, total_power, generators=generators,
+        )
+    else:
+        # Legacy single-generator fallback for older clients.
+        generator_power = payload.get("generator_power", 0)
+        generator_is_diesel = payload.get("fuel") == "Diesel"
+        data, base_emissions, modified_emissions = prepare_emissions(
+            lat, lon, total_power,
+            generator_power=generator_power,
+            generator_is_diesel=generator_is_diesel,
+        )
 
     # Calculate the difference in pollutants
     compute = Compute(data)
@@ -39,11 +54,15 @@ def compute_effects():
 
     total_costs_by_county = (jnp.vstack(impact.values()).sum(axis=0)).tolist()
 
-
+    naaqs_idx = (jnp.nonzero(compute.compute_pm(control_aq_vectors) > 35)[0]).tolist()
+    naaqs_fips = [COUNTY_FIPS[i] for i in naaqs_idx if 0 <= i < len(COUNTY_FIPS)]
 
     return jsonify({
         "health_cost_by_county": total_costs_by_county,
-        "naaqs_violations": (jnp.nonzero(compute.compute_pm(control_aq_vectors) > 35)[0] + 1).tolist() #Ambient PM2.5 must not exceed 35μg/m3
+        "county_fips": COUNTY_FIPS[:len(total_costs_by_county)],
+        "county_names": COUNTY_NAMES[:len(total_costs_by_county)],
+        "naaqs_violations": [i + 1 for i in naaqs_idx],  # 1-indexed sourceindx
+        "naaqs_violation_fips": naaqs_fips,
     })
 
 

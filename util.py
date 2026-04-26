@@ -5,9 +5,7 @@ from pathlib import Path
 import openpyxl
 import pandas as pd
 from data import CobraData
-from center.pollution import datacenter_pollution
-
-from center.pollution import DEFAULT_UTILIZATION, DEFAULT_PUE
+from pollution import datacenter_pollution, DEFAULT_UTILIZATION, DEFAULT_PUE
 
 ROOT = Path(__file__).parent
 
@@ -140,36 +138,56 @@ def most_common_fuel(lat: float, lon: float) -> str:
     most_common = max(mix, key=mix.get)
     return most_common
 
+# EPA Tier 4 final / NSPS-compliant stationary diesel (>560 kW), lb/MMBtu.
+# NOx ~0.50 (≈3.5 g/bhp-hr after SCR), ULSD-grade SO2,
+# PM2.5 ~0.005 (Tier 4 PM standard ~0.04 g/bhp-hr after DPF), VOC ~0.014.
 DIESEL_EMISSION_FACTOR = {
-    "NOx": 4.41,
-    "SO2": 0.29
-} #lb/MMBtu
+    "NOx": 0.50,
+    "SO2": 0.029,
+    "PM25": 0.005,
+    "VOC": 0.014,
+}  # lb/MMBtu
 GAS_EMISSION_FACTOR = {
     "NOx": 1.94,
     "SO2": 5.88e-4,
     "VOC": 1.2e-1,
-    "PM25": 3.84e-2
-} #lb/MMBtu
+    "PM25": 3.84e-2,
+}  # lb/MMBtu
 MWH_TO_MMBTU = 3.41
 LB_TO_KG = 0.453592
+LB_PER_TON = 2000.0  # US short ton — matches grid emissions and the COBRA emissions table
+
+
+def _annual_mwh_for_generator(
+    power_mw: float,
+    mode: str,
+    run_hours: float,
+    utilization: float = DEFAULT_UTILIZATION,
+    pue: float = DEFAULT_PUE,
+) -> float:
+    """Annual MWh delivered by a single generator.
+
+    - Prime: continuous, mw × 8760 × util × pue.
+    - Backup: only the hours it actually runs, mw × run_hours.
+    """
+    if mode == "prime":
+        return power_mw * 8760.0 * utilization * pue
+    return max(0.0, power_mw) * max(0.0, run_hours)
+
 
 def generator_pollution(
-    mw_capacity: float,
+    power_mw: float,
     is_diesel: bool,
+    mode: str = "prime",
+    run_hours: float = 0.0,
     utilization: float = DEFAULT_UTILIZATION,
-    pue: float = DEFAULT_PUE
+    pue: float = DEFAULT_PUE,
 ):
-    annual_mWh = mw_capacity * 8760.0 * utilization * pue
-    annual_MMBtu = annual_mWh * MWH_TO_MMBTU
-
-    if is_diesel:
-        emission_factor = DIESEL_EMISSION_FACTOR
-    else:
-        emission_factor = GAS_EMISSION_FACTOR
-
-    return {
-        k: v * annual_MMBtu * LB_TO_KG for k, v in emission_factor.items()
-    }
+    annual_MWh = _annual_mwh_for_generator(power_mw, mode, run_hours, utilization, pue)
+    annual_MMBtu = annual_MWh * MWH_TO_MMBTU
+    factor = DIESEL_EMISSION_FACTOR if is_diesel else GAS_EMISSION_FACTOR
+    # Short tons/year — matches grid_emissions and the COBRA table.
+    return {k: v * annual_MMBtu / LB_PER_TON for k, v in factor.items()}
 
 
 def load_sectors() -> pd.DataFrame:
@@ -208,30 +226,151 @@ def get_source_index(counties: pd.DataFrame, fips: str) -> int:
     return counties[counties["FIPS"] == int(fips)]["SOURCEINDX"].iloc[0]
 
 
+_COBRA_POLLUTANTS = ['NOx', 'SO2', 'NH3', 'SOA', 'PM25', 'VOC']
+
+
+@lru_cache(maxsize=None)
+def _grid_sourceindxs_for_subregion(subregion_code: str) -> tuple:
+    """Counties (by SOURCEINDX) that contain power plants in the given eGRID subregion.
+
+    Grid emissions get added at the *generating sources*, not at the user's data-center
+    county, because the data center pulls electrons from these plants — not burns fuel
+    onsite. Cached so the eGRID plant scan runs once per subregion.
+    """
+    counties = load_counties()
+    indices = set()
+    for plat, plon, sub in _plant_locations():
+        if sub != subregion_code:
+            continue
+        diffs = (counties['LAT'] - plat) ** 2 + (counties['LON'] - plon) ** 2
+        idx = int(diffs.idxmin())
+        indices.add(int(counties.loc[idx, 'SOURCEINDX']))
+    return tuple(sorted(indices))
+
+
+def _add_to_baseline(
+    data: CobraData,
+    raw_base,
+    raw_modified,
+    addition: dict,
+    tier_ids: list,
+    sourceindxs: list,
+):
+    """Add `addition` (tons/yr per pollutant) on top of baseline for matching sector/counties.
+
+    CobraData.modify_emissions uses REPLACE semantics (sets new total = payload). For a
+    new-facility scenario we want ADD: pass `existing_baseline + addition` as the new
+    total. This also preserves baseline for pollutants the addition doesn't mention,
+    instead of accidentally zeroing PM25/VOC/NH3 because the payload happened to omit them.
+    """
+    if not any(addition.get(p, 0) for p in _COBRA_POLLUTANTS):
+        return raw_modified
+    mask = (
+        (raw_base['TIER1'] == int(tier_ids[0])) &
+        (raw_base['TIER2'] == int(tier_ids[1])) &
+        (raw_base['TIER3'] == int(tier_ids[2])) &
+        (raw_base['sourceindx'].isin(sourceindxs))
+    )
+    existing = raw_base.loc[mask, _COBRA_POLLUTANTS].sum()
+    new_total = {p: float(existing.get(p, 0)) + float(addition.get(p, 0)) for p in _COBRA_POLLUTANTS}
+    return data.modify_emissions(raw_modified, new_total, tier_ids, sourceindxs)
+
+
 def prepare_emissions(
     lat: float,
     lon: float,
     total_power: float,
-    generator_power: float,
-    generator_is_diesel: bool
+    generators: list | None = None,
+    *,
+    generator_power: float = 0.0,
+    generator_is_diesel: bool = True,
+    utilization: float = DEFAULT_UTILIZATION,
+    pue: float = DEFAULT_PUE,
 ) -> tuple:
+    """Build base + modified emission tables for COBRA.
+
+    `generators` is a list of dicts {fuel, powerMW, mode, runHours}. When omitted the
+    legacy single-generator params are used (assumed prime power) for backwards compat.
+    """
     sectors = load_sectors()
     county = estimate_county(lat, lon)
-    common_fuel = most_common_fuel(lat, lon)
-    grid_fuel_id = get_grid_fuel_id(common_fuel)
-    grid_tier_ids = get_tier_ids(sectors, grid_fuel_id)
-    grid_emissions = datacenter_pollution(lat, lon, total_power - generator_power)["emissions"]
-    grid_emissions = {k: v["tons_per_year"] for k, v in grid_emissions.items()}
     counties = load_counties()
-    sourceindx = get_source_index(counties, county["fips"])
+    site_sourceindx = get_source_index(counties, county["fips"])
     data = CobraData()
     raw_base = data.load_emissions_base()
     base_emissions = data.summarize_emissions(raw_base)
-    # Note: EPA data doesn't have PM25, VOC, SOA
-    grid_raw = data.modify_emissions(raw_base, grid_emissions, grid_tier_ids, [sourceindx])
-    generator_fuel_id = get_generator_fuel_id(generator_is_diesel)
-    generator_tier_ids = get_tier_ids(sectors, generator_fuel_id)
-    generator_emissions = generator_pollution(generator_power, generator_is_diesel)
-    generator_raw = data.modify_emissions(grid_raw, generator_emissions, generator_tier_ids, [sourceindx])
-    modified_emissions = data.summarize_emissions(generator_raw)
+
+    diesel_total: dict = {}
+    gas_total: dict = {}
+    gen_annual_MWh_total = 0.0
+
+    if generators is None:
+        generators = [{
+            "fuel": "Diesel" if generator_is_diesel else "Natural Gas",
+            "powerMW": generator_power,
+            "mode": "prime",
+            "runHours": 0.0,
+        }]
+
+    for gen in generators:
+        power_mw = float(gen.get("powerMW", 0) or 0)
+        if power_mw <= 0:
+            continue
+        is_diesel = gen.get("fuel") == "Diesel"
+        mode = gen.get("mode", "prime")
+        run_hours = float(gen.get("runHours", 0) or 0)
+        gen_annual_MWh_total += _annual_mwh_for_generator(
+            power_mw, mode, run_hours, utilization, pue
+        )
+        emissions = generator_pollution(
+            power_mw, is_diesel, mode=mode, run_hours=run_hours,
+            utilization=utilization, pue=pue,
+        )
+        bucket = diesel_total if is_diesel else gas_total
+        for k, v in emissions.items():
+            bucket[k] = bucket.get(k, 0.0) + v
+
+    # Grid energy = facility load minus what generators actually deliver. For backup
+    # gens that almost never run, gen energy ≈ 0 → grid_mw ≈ total_power, which is
+    # what you'd expect (the data center is grid-fed almost all the time).
+    facility_annual_MWh = total_power * 8760.0 * utilization * pue
+    grid_annual_MWh = max(0.0, facility_annual_MWh - gen_annual_MWh_total)
+    grid_equivalent_mw = (
+        grid_annual_MWh / (8760.0 * utilization * pue) if utilization * pue > 0 else 0.0
+    )
+
+    grid_meta = datacenter_pollution(
+        lat, lon, grid_equivalent_mw, utilization=utilization, pue=pue
+    )
+    common_fuel = most_common_fuel(lat, lon)
+    grid_fuel_id = get_grid_fuel_id(common_fuel)
+    grid_tier_ids = get_tier_ids(sectors, grid_fuel_id)
+    grid_emissions = {
+        k: (v["tons_per_year"] if isinstance(v, dict) else 0) or 0
+        for k, v in grid_meta["emissions"].items()
+    }
+
+    # Distribute grid emissions across the eGRID subregion's *generating plants*.
+    subregion_code = grid_meta["geo"]["subregion_code"]
+    plant_sourceindxs = list(_grid_sourceindxs_for_subregion(subregion_code))
+    if not plant_sourceindxs:
+        plant_sourceindxs = [site_sourceindx]
+
+    modified = _add_to_baseline(
+        data, raw_base, raw_base, grid_emissions, grid_tier_ids, plant_sourceindxs
+    )
+
+    # Onsite generators are physically at the user's site.
+    if any(diesel_total.values()):
+        diesel_tier = get_tier_ids(sectors, get_generator_fuel_id(True))
+        modified = _add_to_baseline(
+            data, raw_base, modified, diesel_total, diesel_tier, [site_sourceindx]
+        )
+    if any(gas_total.values()):
+        gas_tier = get_tier_ids(sectors, get_generator_fuel_id(False))
+        modified = _add_to_baseline(
+            data, raw_base, modified, gas_total, gas_tier, [site_sourceindx]
+        )
+
+    modified_emissions = data.summarize_emissions(modified)
     return data, base_emissions, modified_emissions
