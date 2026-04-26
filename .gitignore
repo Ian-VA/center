@@ -1,6 +1,40 @@
+# --- Python (backend) ---
 __pycache__/
-extracted/
-echo_bulk/
-COBRA
-data/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
 
+# Backend-local caches and generated artifacts
+backend/extracted/
+backend/echo_bulk/
+backend/fetch_cache/
+backend/center/echo_bulk/
+backend/scale_extract.log
+backend/models/
+
+# Large COBRA inputs / runtime caches — symlinked into place locally,
+# not committed (the real files are gigabytes).
+backend/COBRA
+backend/data/cobra_slim.db
+backend/data/sr_matrices.npz
+
+# --- Node / Next.js (frontend) ---
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+next-env.d.ts
+
+# --- Local env ---
+.env.local
+.env.*.local
+
+# --- Editor / OS ---
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
