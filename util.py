@@ -3,6 +3,9 @@ import math
 from functools import lru_cache
 from pathlib import Path
 import openpyxl
+import pandas as pd
+from data import CobraData
+from center.pollution import datacenter_pollution
 
 from center.pollution import DEFAULT_UTILIZATION, DEFAULT_PUE
 
@@ -167,3 +170,68 @@ def generator_pollution(
     return {
         k: v * annual_MMBtu * LB_TO_KG for k, v in emission_factor.items()
     }
+
+
+def load_sectors() -> pd.DataFrame:
+    return pd.read_json(ROOT / "data" / "sectors.json")
+
+
+def get_grid_fuel_id(common_fuel: str) -> int:
+    if common_fuel == "coal":
+        return 544  # Bit coal
+    elif common_fuel == "gas":
+        return 545  # Natural gas
+    else:
+        return 548  # Distillate oil
+
+
+def get_generator_fuel_id(is_diesel: bool) -> int:
+    if is_diesel:
+        return 548
+    else:
+        return 545  # Natural Gas
+
+
+def get_tier_ids(sectors: pd.DataFrame, fuel_id: int) -> list:
+    return list(
+        sectors[sectors["ID"] == fuel_id][
+            ["TIER1", "TIER2", "TIER3"]
+        ].iloc[0]
+    )
+
+
+def load_counties() -> pd.DataFrame:
+    return pd.read_json(ROOT / "data" / "counties.json")
+
+
+def get_source_index(counties: pd.DataFrame, fips: str) -> int:
+    return counties[counties["FIPS"] == int(fips)]["SOURCEINDX"].iloc[0]
+
+
+def prepare_emissions(
+    lat: float,
+    lon: float,
+    total_power: float,
+    generator_power: float,
+    generator_is_diesel: bool
+) -> tuple:
+    sectors = load_sectors()
+    county = estimate_county(lat, lon)
+    common_fuel = most_common_fuel(lat, lon)
+    grid_fuel_id = get_grid_fuel_id(common_fuel)
+    grid_tier_ids = get_tier_ids(sectors, grid_fuel_id)
+    grid_emissions = datacenter_pollution(lat, lon, total_power - generator_power)["emissions"]
+    grid_emissions = {k: v["tons_per_year"] for k, v in grid_emissions.items()}
+    counties = load_counties()
+    sourceindx = get_source_index(counties, county["fips"])
+    data = CobraData()
+    raw_base = data.load_emissions_base()
+    base_emissions = data.summarize_emissions(raw_base)
+    # Note: EPA data doesn't have PM25, VOC, SOA
+    grid_raw = data.modify_emissions(raw_base, grid_emissions, grid_tier_ids, [sourceindx])
+    generator_fuel_id = get_generator_fuel_id(generator_is_diesel)
+    generator_tier_ids = get_tier_ids(sectors, generator_fuel_id)
+    generator_emissions = generator_pollution(generator_power, generator_is_diesel)
+    generator_raw = data.modify_emissions(grid_raw, generator_emissions, generator_tier_ids, [sourceindx])
+    modified_emissions = data.summarize_emissions(generator_raw)
+    return data, base_emissions, modified_emissions

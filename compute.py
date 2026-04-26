@@ -13,7 +13,6 @@ NUM_COUNTIES = 3108
 NUM_STACK_TYPES = 4
 AGE_COLUMNS = [f"Age{i}" for i in range(100)]
 
-
 class Compute:
     def __init__(self, data: CobraData, load_sr = True):
         self.data = data

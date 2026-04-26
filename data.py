@@ -1,10 +1,10 @@
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 import jax.numpy as jnp
 import pandas as pd
 from sqlalchemy import create_engine
 import numpy as np
-import os
 
 NUM_COUNTIES = 3108
 NUM_STACK_TYPES = 4
@@ -12,22 +12,22 @@ AGE_COLUMNS = [f"Age{i}" for i in range(100)]
 
 # CSV file paths for fallback
 CSV_PATHS = {
-    'CR_FUNCTIONS': 'COBRA/input files/default data/default_CR_functions.csv',
-    'DICT': 'COBRA/input files/data dictionary/SOURCEINDX to FIPS crosswalk.csv',
-    'TIERS': 'COBRA/input files/data dictionary/EmissionsTier Definitions.csv',
-    'STACK_HEIGHTS': 'COBRA/input files/data dictionary/typeindx - stack heights.csv',
-    'POPULATION_2016': 'COBRA/input files/default data/default_2016_population_data.csv',
-    'POPULATION_2023': 'COBRA/input files/default data/default_2023_population_data.csv',
-    'POPULATION_2028': 'COBRA/input files/default data/default_2028_population_data.csv',
-    'INCIDENCE_2016': 'COBRA/input files/default data/default_2016_incidence_data.csv',
-    'INCIDENCE_2023': 'COBRA/input files/default data/default_2023_incidence_data.csv',
-    'INCIDENCE_2028': 'COBRA/input files/default data/default_2028_incidence_data.csv',
-    'VALUATION_2016': 'COBRA/input files/default data/default_2016_valuation_data.csv',
-    'VALUATION_2023': 'COBRA/input files/default data/default_2023_valuation_data.csv',
-    'VALUATION_2028': 'COBRA/input files/default data/default_2028_valuation_data.csv',
-    'EMISSIONS_2016': 'COBRA/input files/emissions/Emissions_2016.csv',
-    'EMISSIONS_2023': 'COBRA/input files/emissions/Emissions_2023.csv',
-    'EMISSIONS_2028': 'COBRA/input files/emissions/Emissions_2028.csv',
+    'CR_FUNCTIONS': Path('COBRA/input files/default data/default_CR_functions.csv'),
+    'DICT': Path('COBRA/input files/data dictionary/SOURCEINDX to FIPS crosswalk.csv'),
+    'TIERS': Path('COBRA/input files/data dictionary/EmissionsTier Definitions.csv'),
+    'STACK_HEIGHTS': Path('COBRA/input files/data dictionary/typeindx - stack heights.csv'),
+    'POPULATION_2016': Path('COBRA/input files/default data/default_2016_population_data.csv'),
+    'POPULATION_2023': Path('COBRA/input files/default data/default_2023_population_data.csv'),
+    'POPULATION_2028': Path('COBRA/input files/default data/default_2028_population_data.csv'),
+    'INCIDENCE_2016': Path('COBRA/input files/default data/default_2016_incidence_data.csv'),
+    'INCIDENCE_2023': Path('COBRA/input files/default data/default_2023_incidence_data.csv'),
+    'INCIDENCE_2028': Path('COBRA/input files/default data/default_2028_incidence_data.csv'),
+    'VALUATION_2016': Path('COBRA/input files/default data/default_2016_valuation_data.csv'),
+    'VALUATION_2023': Path('COBRA/input files/default data/default_2023_valuation_data.csv'),
+    'VALUATION_2028': Path('COBRA/input files/default data/default_2028_valuation_data.csv'),
+    'EMISSIONS_2016': Path('COBRA/input files/emissions/Emissions_2016.csv'),
+    'EMISSIONS_2023': Path('COBRA/input files/emissions/Emissions_2023.csv'),
+    'EMISSIONS_2028': Path('COBRA/input files/emissions/Emissions_2028.csv'),
 }
 
 
@@ -90,6 +90,7 @@ class ValuationFunction:
     incidence_endpoint: str = ""
 
 
+ROOT = Path(__file__).parent
 class CobraData:
     """
     Main data access class for COBRA calculations.
@@ -98,7 +99,7 @@ class CobraData:
     efficient access methods for the computation pipeline.
     """
 
-    def __init__(self, db_path: str = "data/cobra.db"):
+    def __init__(self, db_path = ROOT / "data" / "cobra_slim.db"):
         self.engine = create_engine(f"sqlite+pysqlite:///{db_path}")
 
         self._emissions_base: Optional[pd.DataFrame] = None
@@ -132,7 +133,7 @@ class CobraData:
             # If empty and we have a CSV fallback, try reading from CSV
             if df.empty and csv_key and csv_key in CSV_PATHS:
                 csv_path = CSV_PATHS[csv_key]
-                if os.path.exists(csv_path):
+                if csv_path.exists():
                     print(f"SQL returned empty data, falling back to CSV: {csv_path}")
                     df = pd.read_csv(csv_path)
                     df = self._normalize_csv_columns(df, csv_key)
@@ -142,11 +143,12 @@ class CobraData:
             # If SQL fails completely and we have a CSV fallback, try reading from CSV
             if csv_key and csv_key in CSV_PATHS:
                 csv_path = CSV_PATHS[csv_key]
-                if os.path.exists(csv_path):
+                if csv_path.exists():
                     print(f"SQL query failed ({e}), falling back to CSV: {csv_path}")
                     df = pd.read_csv(csv_path)
                     df = self._normalize_csv_columns(df, csv_key)
                     return df
+
             raise
 
     def _normalize_csv_columns(self, df: pd.DataFrame, csv_key: str) -> pd.DataFrame:
@@ -402,7 +404,7 @@ class CobraData:
 
         return tuple(x / total_emissions for x in stack_emissions)
 
-    def load_sr_matrices(self, cache_path: str = "data/sr_matrices.npz") -> dict:
+    def load_sr_matrices(self, cache_path: Path = ROOT / "data" / "sr_matrices.npz") -> dict:
         """
         Load Source-Receptor matrices from database.
 
@@ -425,7 +427,7 @@ class CobraData:
         col_map = {'dp': 'c_PM25', 'NOx': 'c_NO3', 'SO4': 'c_SO4', 'O3V': 'c_O3V', 'O3N': 'c_O3N'}
 
         # Try loading from .npz cache
-        if os.path.exists(cache_path):
+        if cache_path.exists():
             print(f"Loading SR matrices from cache: {cache_path}")
             data = jnp.load(cache_path)
             self._sr_matrices = {}
@@ -435,67 +437,68 @@ class CobraData:
                 ]
             return self._sr_matrices
 
-        print("Loading SR matrices from database (first load, will cache for next time) ...")
-        import sqlite3 as _sqlite3
-        import time
-
-        start = time.time()
-
-        # Use raw sqlite3 for fastest bulk read (avoids pandas overhead for 38M rows)
-        db_url = str(self.engine.url).replace("sqlite+pysqlite:///", "")
-        conn = _sqlite3.connect(db_url)
-
-        # Build matrices using vectorized numpy operations per stack type
-        arrays = {key: [np.zeros((NUM_COUNTIES, NUM_COUNTIES), dtype=np.float32)
-                        for _ in range(NUM_STACK_TYPES)] for key in pollutant_keys}
-
-        for t in range(NUM_STACK_TYPES):
-            typeindx = t + 1
-            cursor = conn.execute(
-                "SELECT sourceindx, destindx, c_PM25, c_NO3, c_SO4, c_O3V, c_O3N "
-                "FROM SYS_Srmatrix WHERE typeindx = ?",
-                (typeindx,)
-            )
-
-            rows = cursor.fetchall()
-            if not rows:
-                continue
-
-            data_arr = np.array(rows, dtype=np.float64)
-            s_idx = (data_arr[:, 0] - 1).astype(np.intp)
-            d_idx = (data_arr[:, 1] - 1).astype(np.intp)
-
-            # Bounds check
-            valid = (s_idx >= 0) & (s_idx < NUM_COUNTIES) & (d_idx >= 0) & (d_idx < NUM_COUNTIES)
-            s_idx = s_idx[valid]
-            d_idx = d_idx[valid]
-
-            for i, key in enumerate(pollutant_keys):
-                col_data = np.nan_to_num(data_arr[valid, 2 + i], nan=0.0).astype(np.float32)
-                arrays[key][t][d_idx, s_idx] = col_data
-
-            elapsed = time.time() - start
-            print(f"  typeindx {typeindx}/4 loaded ({len(rows):,} rows, {elapsed:.1f}s elapsed)")
-
-        conn.close()
-
-        # Save cache
-        cache_data = {}
-        for key in pollutant_keys:
-            for t in range(NUM_STACK_TYPES):
-                cache_data[f"{key}_{t}"] = arrays[key][t]
-        np.savez(cache_path, **cache_data)
-        print(f"  Cached to {cache_path} ({os.path.getsize(cache_path) / 1e6:.0f} MB)")
-
-        # Convert to JAX
-        self._sr_matrices = {}
-        for key in pollutant_keys:
-            self._sr_matrices[key] = [jnp.array(arrays[key][t]) for t in range(NUM_STACK_TYPES)]
-
-        total = time.time() - start
-        print(f"  SR matrices loaded in {total:.1f}s")
-
-        return self._sr_matrices
+        raise
+        # print("Loading SR matrices from database (first load, will cache for next time) ...")
+        # import sqlite3 as _sqlite3
+        # import time
+        #
+        # start = time.time()
+        #
+        # # Use raw sqlite3 for fastest bulk read (avoids pandas overhead for 38M rows)
+        # db_url = str(self.engine.url).replace("sqlite+pysqlite:///", "")
+        # conn = _sqlite3.connect(db_url)
+        #
+        # # Build matrices using vectorized numpy operations per stack type
+        # arrays = {key: [np.zeros((NUM_COUNTIES, NUM_COUNTIES), dtype=np.float32)
+        #                 for _ in range(NUM_STACK_TYPES)] for key in pollutant_keys}
+        #
+        # for t in range(NUM_STACK_TYPES):
+        #     typeindx = t + 1
+        #     cursor = conn.execute(
+        #         "SELECT sourceindx, destindx, c_PM25, c_NO3, c_SO4, c_O3V, c_O3N "
+        #         "FROM SYS_Srmatrix WHERE typeindx = ?",
+        #         (typeindx,)
+        #     )
+        #
+        #     rows = cursor.fetchall()
+        #     if not rows:
+        #         continue
+        #
+        #     data_arr = np.array(rows, dtype=np.float64)
+        #     s_idx = (data_arr[:, 0] - 1).astype(np.intp)
+        #     d_idx = (data_arr[:, 1] - 1).astype(np.intp)
+        #
+        #     # Bounds check
+        #     valid = (s_idx >= 0) & (s_idx < NUM_COUNTIES) & (d_idx >= 0) & (d_idx < NUM_COUNTIES)
+        #     s_idx = s_idx[valid]
+        #     d_idx = d_idx[valid]
+        #
+        #     for i, key in enumerate(pollutant_keys):
+        #         col_data = np.nan_to_num(data_arr[valid, 2 + i], nan=0.0).astype(np.float32)
+        #         arrays[key][t][d_idx, s_idx] = col_data
+        #
+        #     elapsed = time.time() - start
+        #     print(f"  typeindx {typeindx}/4 loaded ({len(rows):,} rows, {elapsed:.1f}s elapsed)")
+        #
+        # conn.close()
+        #
+        # # Save cache
+        # cache_data = {}
+        # for key in pollutant_keys:
+        #     for t in range(NUM_STACK_TYPES):
+        #         cache_data[f"{key}_{t}"] = arrays[key][t]
+        # np.savez(cache_path, **cache_data)
+        # print(f"  Cached to {cache_path} ({cache_path.stat().st_size / 1e6:.0f} MB)")
+        #
+        # # Convert to JAX
+        # self._sr_matrices = {}
+        # for key in pollutant_keys:
+        #     self._sr_matrices[key] = [jnp.array(arrays[key][t]) for t in range(NUM_STACK_TYPES)]
+        #
+        # total = time.time() - start
+        # print(f"  SR matrices loaded in {total:.1f}s")
+        #
+        # return self._sr_matrices
 
     def load_population(self, year: Optional[int] = None) -> pd.DataFrame:
         """
@@ -751,6 +754,6 @@ class CobraData:
         return self._read_sql_with_csv_fallback(query, None)  # No CSV fallback available
 
 
-def get_cobra_data(db_path: str = "data/cobra.db") -> CobraData:
+def get_cobra_data(db_path: Path = Path("data/cobra.db")) -> CobraData:
     """Create and return a CobraData instance."""
     return CobraData(db_path)
