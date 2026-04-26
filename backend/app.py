@@ -2,7 +2,6 @@ from flask import Flask, request, jsonify
 import pandas as pd
 import jax.numpy as jnp
 
-from pollution import datacenter_pollution  # noqa: F401  (kept for any downstream imports)
 from data import CobraData
 from compute import Compute
 from util import prepare_emissions
