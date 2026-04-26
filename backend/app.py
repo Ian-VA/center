@@ -66,28 +66,61 @@ def compute_effects():
     })
 
 
+def _first_present(payload: dict, *keys):
+    for k in keys:
+        if k in payload and payload[k] is not None:
+            return payload[k]
+    return None
+
+
+def _to_float(v):
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 @app.post("/predict-permit")
 def predict_permit_endpoint():
     payload = request.json or {}
     try:
-        lat = float(payload["lat"])
-        lon = float(payload["lon"])
-        mw = float(payload["mw_capacity"])
+        lat = float(_first_present(payload, "lat", "latitude"))
+        lon = float(_first_present(payload, "lon", "lng", "longitude"))
+        mw = float(_first_present(
+            payload, "mw_capacity", "mwCapacity", "mw", "total_power", "totalPower",
+        ))
     except (KeyError, TypeError, ValueError) as e:
         return jsonify({"error": f"missing or invalid lat/lon/mw_capacity: {e}"}), 400
 
-    pollution_cost = payload.get("pollution_cost_usd_per_year")
-    if pollution_cost is not None:
-        try:
-            pollution_cost = float(pollution_cost)
-        except (TypeError, ValueError):
-            pollution_cost = None
+    pollution_cost = _to_float(_first_present(
+        payload, "pollution_cost_usd_per_year", "pollutionCostUsdPerYear",
+        "pollution_cost", "pollutionCost",
+    ))
+    square_footage = _to_float(_first_present(
+        payload, "square_footage", "squareFootage", "sqft",
+        "square_feet", "squareFeet", "facility_size_sqft", "facilitySizeSqft",
+    ))
+
+    generators = _first_present(payload, "generators", "generatorList")
+    if generators is not None and not isinstance(generators, list):
+        generators = None
 
     try:
-        result = predict_permit_timeline(mw, lat, lon, pollution_cost)
+        result = predict_permit_timeline(
+            mw, lat, lon, pollution_cost, square_footage, generators,
+        )
     except Exception as e:
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
+    # Echo what the server actually parsed, so frontend mismatches are debuggable.
+    result["_request_received"] = {
+        "lat": lat, "lon": lon, "mw_capacity": mw,
+        "square_footage": square_footage,
+        "pollution_cost_usd_per_year": pollution_cost,
+        "generators": generators,
+    }
     return jsonify(result)
 
 

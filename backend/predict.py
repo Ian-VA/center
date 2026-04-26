@@ -45,6 +45,7 @@ import anthropic
 
 ROOT = Path(__file__).parent
 EVENTS_CSV = ROOT / "final" / "permit_timeline_events.csv"
+WIDE_CSV = ROOT / "final" / "data_centers_wide.csv"
 MODEL = "claude-sonnet-4-6"
 
 # Application → decision pairings the dataset uses. Each pair represents one regulatory
@@ -206,6 +207,117 @@ def _projects() -> list[dict]:
             "cycle": cycle,
         })
     return projects
+
+
+def _ood_cap(
+    mw_capacity: float, square_footage: float | None, dist: dict,
+) -> tuple[float | None, str | None]:
+    """Hard p_approved cap when the candidate is out-of-distribution.
+
+    LLM prompt rules don't bind reliably for tail-end inputs, so we enforce a
+    deterministic ceiling here instead of trusting Sonnet to apply the cap itself.
+    Returns (cap, reason). Cap is None when the candidate is in-distribution.
+    """
+    sqft_d = dist["sqft"]
+    mw_d = dist["mw"]
+    ratio_d = dist["sqft_per_mw"]
+    candidates: list[tuple[float, str]] = []
+
+    if square_footage:
+        if square_footage > 5 * sqft_d["max"]:
+            candidates.append((0.05,
+                f"sqft {square_footage:,.0f} > 5× historical max ({sqft_d['max']:,})"))
+        elif square_footage > 2 * sqft_d["max"]:
+            candidates.append((0.10,
+                f"sqft {square_footage:,.0f} > 2× historical max ({sqft_d['max']:,})"))
+        elif square_footage > sqft_d["p99"]:
+            candidates.append((0.30,
+                f"sqft {square_footage:,.0f} > p99 ({sqft_d['p99']:,})"))
+
+    if mw_capacity > 2 * mw_d["max"]:
+        candidates.append((0.05,
+            f"MW {mw_capacity:,.0f} > 2× historical max ({mw_d['max']:,})"))
+    elif mw_capacity > mw_d["p99"]:
+        candidates.append((0.40,
+            f"MW {mw_capacity:,.0f} > p99 ({mw_d['p99']:,})"))
+
+    if square_footage and mw_capacity > 0:
+        ratio = square_footage / mw_capacity
+        if ratio > 3 * ratio_d["p90"]:
+            candidates.append((0.20,
+                f"sqft/MW {ratio:,.0f} > 3× p90 ({3 * ratio_d['p90']:,})"
+                f" — implausibly under-powered"))
+        elif ratio < ratio_d["p10"] / 3 and ratio_d["p10"] > 0:
+            candidates.append((0.20,
+                f"sqft/MW {ratio:,.0f} < p10/3 ({ratio_d['p10'] // 3:,})"
+                f" — implausibly over-powered"))
+
+    if not candidates:
+        return (None, None)
+    cap, reason = min(candidates, key=lambda x: x[0])
+    return (cap, reason)
+
+
+@lru_cache(maxsize=1)
+def _scale_distribution() -> dict:
+    """Empirical sqft + MW + sqft/MW distributions from the historical dataset.
+
+    Used to ground the LLM's plausibility check on real numbers rather than vibes.
+    Falls back to hardcoded estimates if the wide CSV is unavailable.
+    """
+    fallback = {
+        "sqft": {"n": 894, "p50": 200_000, "p90": 1_000_000, "p99": 2_100_000, "max": 2_100_000},
+        "mw": {"n": 504, "p50": 100, "p90": 750, "p99": 1_500, "max": 2_000},
+        "sqft_per_mw": {"p10": 1_500, "p50": 5_000, "p90": 12_000},
+    }
+    if not WIDE_CSV.exists():
+        return fallback
+    sqfts: list[float] = []
+    mws: list[float] = []
+    ratios: list[float] = []
+    try:
+        for row in csvmod.DictReader(WIDE_CSV.open()):
+            sqft_raw = (row.get("facility_size_sqft") or "").strip().replace(",", "")
+            mw_raw = (row.get("project_mw") or row.get("mw") or "").strip()
+            sqft = None
+            mw = None
+            try:
+                sqft = float(sqft_raw)
+                if sqft <= 0:
+                    sqft = None
+            except ValueError:
+                pass
+            mw = _parse_mw(mw_raw)
+            if sqft is not None:
+                sqfts.append(sqft)
+            if mw is not None:
+                mws.append(mw)
+            if sqft is not None and mw is not None and mw > 0:
+                ratios.append(sqft / mw)
+    except (OSError, csvmod.Error):
+        return fallback
+
+    def pct(arr: list[float], p: float) -> int:
+        if not arr:
+            return 0
+        s = sorted(arr)
+        return int(s[min(len(s) - 1, int(round((len(s) - 1) * p / 100)))])
+
+    if not sqfts or not mws:
+        return fallback
+    return {
+        "sqft": {
+            "n": len(sqfts), "p50": pct(sqfts, 50), "p90": pct(sqfts, 90),
+            "p99": pct(sqfts, 99), "max": int(max(sqfts)),
+        },
+        "mw": {
+            "n": len(mws), "p50": pct(mws, 50), "p90": pct(mws, 90),
+            "p99": pct(mws, 99), "max": int(max(mws)),
+        },
+        "sqft_per_mw": {
+            "p10": pct(ratios, 10), "p50": pct(ratios, 50), "p90": pct(ratios, 90),
+        },
+    }
 
 
 def _global_anchors() -> dict:
@@ -417,14 +529,34 @@ def _knn_predict(mw_capacity: float, lat: float, lon: float, k: int = KNN_K) -> 
     }
 
 
-# ---------------- LLM key-factors ----------------
+# ---------------- LLM probability assessment ----------------
 
-NARRATIVE_TOOL = {
-    "name": "report_key_factors",
-    "description": "List 3-5 drivers of the kNN+KM permit-timeline prediction.",
+ASSESSMENT_TOOL = {
+    "name": "report_permit_assessment",
+    "description": (
+        "Produce a permit-approval probability with a confidence band, plus 3-5 key drivers."
+    ),
     "input_schema": {
         "type": "object",
         "properties": {
+            "p_approved": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0,
+                "description": "Final probability the project is ever approved (0-1).",
+            },
+            "p_approved_ci_low": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0,
+                "description": "Lower bound of an ~80% confidence band for p_approved.",
+            },
+            "p_approved_ci_high": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0,
+                "description": "Upper bound of an ~80% confidence band for p_approved.",
+            },
             "key_factors": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -433,16 +565,57 @@ NARRATIVE_TOOL = {
                 "description": "Each factor ≤ 12 words, no padding.",
             },
         },
-        "required": ["key_factors"],
+        "required": [
+            "p_approved", "p_approved_ci_low", "p_approved_ci_high", "key_factors",
+        ],
     },
 }
 
-NARRATIVE_SYSTEM = """You explain pre-computed kNN+Kaplan-Meier permit-timeline forecasts.
-The number of days and probability of approval are already calculated by a survival model
-over historical data center projects with matched application→decision permit cycles. Your
-only job is to identify 3-5 key factors that drive the prediction (each ≤ 12 words).
+ASSESSMENT_SYSTEM = """You assess US data-center permit approval probability.
 
-Be terse. No prose. No preamble. Output ONLY via the report_key_factors tool."""
+The kNN+KM baseline you are given was computed using ONLY the candidate's lat/lon and
+MW. It does not see square footage, generators, or pollution cost — so red flags from
+those fields can and should override the baseline. Treat the baseline as the prior
+when the candidate sits inside the historical distribution; depart from it materially
+when out-of-distribution evidence is present.
+
+Hard rules:
+  - If candidate sqft > p99 of historical sqft, cap p_approved ≤ 0.35 (this is a
+    rarely-seen mega-project; opposition + review burden is acute). If sqft > 2× the
+    historical max, cap p_approved ≤ 0.20.
+  - If candidate MW > p99 of historical MW, cap p_approved ≤ 0.40.
+  - sqft / MW typically falls in [p10, p90] of the historical ratio. If the candidate
+    ratio is OUTSIDE that band by ≥ 3×, the project is implausibly proportioned
+    (under- or over-powered for its size). Cap p_approved ≤ 0.25 and flag this in
+    key_factors. Hyperscale norms: ~5,000 sqft/MW; under 1,500 means under-powered,
+    over 15,000 means dramatically under-utilized space.
+  - Big diesel backup (>100 MW total) triggers Title V air-permit scrutiny — mark
+    down by 0.05–0.15 depending on state.
+  - Pollution social cost > $5M/yr signals dirty grid + scrutiny risk — mark down
+    proportionally.
+
+When in-distribution and analogs are mostly approved/operating, stay near the kNN
+baseline. When out-of-distribution, depart sharply — do NOT politely nudge.
+
+Substantive factors to reason about:
+  - kNN baseline (anchor for in-distribution candidates).
+  - Scale realism vs the historical sqft/MW/ratio percentiles you'll be given.
+  - Location and state regime: VA/TX/GA approve readily; CA/NY/coastal opposition is
+    higher; rural counties with utility partnerships approve more.
+  - Generator footprint and fuel mix.
+  - Pollution social cost magnitude.
+  - The 5 nearest neighbors' actual outcomes.
+
+CI band: tight (±0.05–0.10) when many in-distribution analogs agree; wide (±0.15–0.25)
+when out-of-distribution or analogs disagree.
+
+key_factors should be grounded PRIMARILY in the 5 nearest historical data centers and
+the candidate's location/state regime. Reference specific neighbors by short name when
+useful (e.g. "Microsoft Project Fulton (approved, 12mi) supports approval"). Only fall
+back to scale/generator/pollution drivers when location+analogs alone don't resolve
+the call, or when an out-of-distribution scale signal forces a cap.
+
+Be terse. No prose. Output ONLY via the report_permit_assessment tool."""
 
 
 def _build_similar_cases(knn: dict, n: int = 5) -> list[dict]:
@@ -471,42 +644,91 @@ def _build_similar_cases(knn: dict, n: int = 5) -> list[dict]:
     return out
 
 
-def _llm_key_factors(
+def _format_generators(generators: list[dict] | None) -> str:
+    if not generators:
+        return "  generators = none specified\n"
+    lines = ["  generators ="]
+    for g in generators:
+        fuel = g.get("fuel", "?")
+        mw = g.get("powerMW", 0) or 0
+        mode = g.get("mode", "?")
+        rh = g.get("runHours", 0) or 0
+        lines.append(f"    - {fuel} {mw} MW, mode={mode}, run_hours={rh}")
+    return "\n".join(lines) + "\n"
+
+
+def _llm_assessment(
     mw_capacity: float, lat: float, lon: float,
-    pollution_cost: float | None, knn: dict, similar_cases: list[dict],
-) -> list[str]:
+    pollution_cost: float | None, square_footage: float | None,
+    generators: list[dict] | None,
+    knn: dict, similar_cases: list[dict],
+) -> dict:
+    """Sonnet returns p_approved (+ CI) and key_factors via a forced tool call."""
     similar_lines = "\n".join(
         f"- {c['name']} ({c['outcome']}): {c['why_similar']}" for c in similar_cases
     )
+    sqft_line = (
+        f"  square_footage = {square_footage:,.0f}\n" if square_footage else ""
+    )
+    pollution_line = (
+        f"  pollution_cost_usd_per_year = {pollution_cost:,.0f}\n"
+        if pollution_cost is not None else "  pollution_cost_usd_per_year = unknown\n"
+    )
+    dist = _scale_distribution()
+    sqft_d = dist["sqft"]; mw_d = dist["mw"]; ratio_d = dist["sqft_per_mw"]
+    candidate_ratio_line = ""
+    if square_footage and mw_capacity > 0:
+        ratio = square_footage / mw_capacity
+        candidate_ratio_line = f"  candidate_sqft_per_mw = {ratio:,.0f}\n"
+
     user_msg = (
         f"CANDIDATE PROJECT:\n"
         f"  mw_capacity = {mw_capacity}\n"
+        f"{sqft_line}"
+        f"{candidate_ratio_line}"
         f"  lat = {lat}, lon = {lon}\n"
-        f"  pollution_cost_usd_per_year = {pollution_cost}\n"
-        f"  inferred_state = {knn['inferred_state']}\n\n"
-        f"PREDICTION (pre-computed — explain, do NOT recompute):\n"
-        f"  days = {knn['median_days']} (range {knn['days_p25']}-{knn['days_p75']})\n"
-        f"  p_approved = {knn['p_approved']:.2f}\n\n"
-        f"SIMILAR HISTORICAL CASES:\n{similar_lines}\n\n"
-        f"Return 3-5 key_factors via the tool. Each ≤ 12 words. Focus on substantive drivers"
-        f" (location, MW, pollution, similar-case outcomes). Do NOT mention sample size,"
-        f" data sparsity, model fallbacks, or 'insufficient data' — those are meta and useless."
+        f"{pollution_line}"
+        f"  inferred_state = {knn['inferred_state']}\n"
+        f"{_format_generators(generators)}\n"
+        f"HISTORICAL DISTRIBUTION (for plausibility check):\n"
+        f"  sqft (n={sqft_d['n']}): p50={sqft_d['p50']:,}, p90={sqft_d['p90']:,},"
+        f" p99={sqft_d['p99']:,}, max={sqft_d['max']:,}\n"
+        f"  MW (n={mw_d['n']}): p50={mw_d['p50']:,}, p90={mw_d['p90']:,},"
+        f" p99={mw_d['p99']:,}, max={mw_d['max']:,}\n"
+        f"  sqft/MW ratio: p10={ratio_d['p10']:,}, p50={ratio_d['p50']:,},"
+        f" p90={ratio_d['p90']:,}\n\n"
+        f"kNN+KM BASELINE (lat/lon/MW only — does NOT see sqft/generators/pollution):\n"
+        f"  baseline_p_approved = {knn['p_approved']:.3f}"
+        f" (CI {knn['p_approved_ci_low']:.3f} – {knn['p_approved_ci_high']:.3f},"
+        f" n={knn['n_km_observations']}, events={knn['n_events']})\n\n"
+        f"5 NEAREST HISTORICAL ANALOGS:\n{similar_lines}\n\n"
+        f"Return p_approved + CI band + 3-5 key_factors via the tool."
     )
     client = anthropic.Anthropic(api_key=_api_key())
     response = client.messages.create(
         model=MODEL,
-        max_tokens=512,
+        max_tokens=1024,
         system=[
-            {"type": "text", "text": NARRATIVE_SYSTEM, "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": ASSESSMENT_SYSTEM, "cache_control": {"type": "ephemeral"}},
         ],
-        tools=[NARRATIVE_TOOL],
-        tool_choice={"type": "tool", "name": "report_key_factors"},
+        tools=[ASSESSMENT_TOOL],
+        tool_choice={"type": "tool", "name": "report_permit_assessment"},
         messages=[{"role": "user", "content": user_msg}],
     )
     for block in response.content:
-        if block.type == "tool_use" and block.name == "report_key_factors":
-            return list(block.input.get("key_factors", []))
-    raise RuntimeError("No key_factors returned")
+        if block.type == "tool_use" and block.name == "report_permit_assessment":
+            payload = block.input
+            lo = float(payload["p_approved_ci_low"])
+            hi = float(payload["p_approved_ci_high"])
+            if lo > hi:
+                lo, hi = hi, lo
+            return {
+                "p_approved": float(payload["p_approved"]),
+                "p_approved_ci_low": lo,
+                "p_approved_ci_high": hi,
+                "key_factors": list(payload.get("key_factors", [])),
+            }
+    raise RuntimeError("No assessment returned")
 
 
 # ---------------- Public API ----------------
@@ -514,11 +736,15 @@ def _llm_key_factors(
 def predict(
     mw_capacity: float, lat: float, lon: float,
     pollution_cost_usd_per_year: float | None = None,
+    square_footage: float | None = None,
+    generators: list[dict] | None = None,
 ) -> dict:
-    """Hybrid kNN+KM permit-timeline prediction.
+    """Hybrid permit-timeline prediction.
 
-    Numerics from KM over the K-nearest historical projects (by lat/lon/MW/state).
-    Similar cases ranked directly from kNN. Sonnet 4.6 generates only key_factors.
+    Days come from Kaplan-Meier over the K-nearest historical projects (by lat/lon/MW/state).
+    Probability of approval comes from Sonnet 4.6, which sees the kNN baseline as a reference
+    anchor plus the candidate's MW, square footage, generators, location, and pollution cost,
+    and adjusts for out-of-distribution signals (e.g. a 6M-sqft outlier).
     """
     # Don't fall back to pollution.py's social_cost_usd_per_year here — that includes
     # CO2/CH4/N2O climate damage costs ($190/ton CO2 etc.), while the frontend's
@@ -527,18 +753,37 @@ def predict(
     # If the caller doesn't pass it, leave it None so Sonnet treats it as unknown.
     knn = _knn_predict(mw_capacity, lat, lon)
     similar_cases = _build_similar_cases(knn)
-    key_factors = _llm_key_factors(
-        mw_capacity, lat, lon, pollution_cost_usd_per_year, knn, similar_cases
+    assessment = _llm_assessment(
+        mw_capacity, lat, lon,
+        pollution_cost_usd_per_year, square_footage, generators,
+        knn, similar_cases,
     )
 
+    p = assessment["p_approved"]
+    lo = assessment["p_approved_ci_low"]
+    hi = assessment["p_approved_ci_high"]
+    cap, cap_reason = _ood_cap(mw_capacity, square_footage, _scale_distribution())
+    cap_applied = None
+    if cap is not None and p > cap:
+        # Clamp the point + CI band to respect the OOD ceiling.
+        p_capped = cap
+        hi_capped = min(hi, cap + 0.05)
+        lo_capped = min(lo, p_capped)
+        cap_applied = {
+            "cap": cap, "reason": cap_reason,
+            "llm_p_approved_before_cap": p,
+            "llm_p_approved_ci_before_cap": [lo, hi],
+        }
+        p, lo, hi = p_capped, lo_capped, hi_capped
+
     return {
-        "p_approved": knn["p_approved"],
-        "p_approved_ci_low": knn["p_approved_ci_low"],
-        "p_approved_ci_high": knn["p_approved_ci_high"],
+        "p_approved": p,
+        "p_approved_ci_low": lo,
+        "p_approved_ci_high": hi,
         "expected_days_to_first_approval": knn["median_days"],
         "days_ci_low": knn["days_p25"],
         "days_ci_high": knn["days_p75"],
-        "key_factors": key_factors,
+        "key_factors": assessment["key_factors"],
         "most_similar_cases": similar_cases,
         "derived_context": {
             "inferred_state": knn["inferred_state"],
@@ -548,6 +793,10 @@ def predict(
             "n_km_observations": knn["n_km_observations"],
             "days_source": knn["days_source"],
             "global_anchors": knn["global_anchors"],
+            "knn_baseline_p_approved": knn["p_approved"],
+            "knn_baseline_p_approved_ci_low": knn["p_approved_ci_low"],
+            "knn_baseline_p_approved_ci_high": knn["p_approved_ci_high"],
+            "out_of_distribution_cap": cap_applied,
         },
     }
 
@@ -560,5 +809,14 @@ if __name__ == "__main__":
     ap.add_argument("--lat", type=float, required=True)
     ap.add_argument("--lon", type=float, required=True)
     ap.add_argument("--pollution-cost", type=float)
+    ap.add_argument("--sqft", type=float, help="Proposed facility square footage")
+    ap.add_argument(
+        "--generators", type=str,
+        help='JSON list, e.g. \'[{"fuel":"Diesel","powerMW":50,"mode":"backup","runHours":50}]\'',
+    )
     args = ap.parse_args()
-    print(json.dumps(predict(args.mw, args.lat, args.lon, args.pollution_cost), indent=2))
+    gens = json.loads(args.generators) if args.generators else None
+    print(json.dumps(
+        predict(args.mw, args.lat, args.lon, args.pollution_cost, args.sqft, gens),
+        indent=2,
+    ))
