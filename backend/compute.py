@@ -6,9 +6,11 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd
+from pathlib import Path
 
 from data import CobraData
 
+ROOT = Path(__file__).parent
 NUM_COUNTIES = 3108
 NUM_STACK_TYPES = 4
 

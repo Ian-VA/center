@@ -13,6 +13,11 @@ import { useLiveLayers } from './hooks/useLiveLayers';
 import { isWithinUSBounds, validatePoint } from './utils/locationValidation';
 import { newGenerator, type OnsiteGenerator } from './utils/generators';
 import {
+  DEFAULT_RESOURCE_ASSUMPTIONS,
+  normalizeResourceAssumptions,
+  type ResourceAssumptions,
+} from './utils/resourceAssumptions';
+import {
   generateAnalysisId,
   loadSavedAnalyses,
   persistSavedAnalyses,
@@ -23,7 +28,8 @@ const DRAFT_KEY = 'center.dashboard-draft.v1';
 
 interface DashboardDraft {
   polygon: LatLng[];
-  mwUsage: number;
+  rackCount: number;
+  resourceAssumptions: ResourceAssumptions;
   gridUsage: number;
   onsiteUsage: number;
   generators: OnsiteGenerator[];
@@ -39,7 +45,13 @@ function loadDraft(): DashboardDraft | null {
     if (!parsed || !Array.isArray(parsed.polygon)) return null;
     return {
       polygon: parsed.polygon,
-      mwUsage: typeof parsed.mwUsage === 'number' ? parsed.mwUsage : 0,
+      rackCount:
+        typeof parsed.rackCount === 'number'
+          ? parsed.rackCount
+          : typeof parsed.mwUsage === 'number'
+            ? Math.max(1, Math.round((parsed.mwUsage * 1000) / 8))
+            : 50,
+      resourceAssumptions: normalizeResourceAssumptions(parsed.resourceAssumptions),
       gridUsage: typeof parsed.gridUsage === 'number' ? parsed.gridUsage : 50,
       onsiteUsage: typeof parsed.onsiteUsage === 'number' ? parsed.onsiteUsage : 50,
       generators: Array.isArray(parsed.generators) ? parsed.generators : [],
@@ -68,7 +80,10 @@ function clearDraft(): void {
 export default function Dashboard() {
   const [polygon, setPolygon] = useState<LatLng[]>([]);
   const [centerOn, setCenterOn] = useState<LatLng | undefined>();
-  const [mwUsage, setMwUsage] = useState<number>(0);
+  const [rackCount, setRackCount] = useState<number>(50);
+  const [resourceAssumptions, setResourceAssumptions] = useState<ResourceAssumptions>(
+    DEFAULT_RESOURCE_ASSUMPTIONS,
+  );
   const [gridUsage, setGridUsage] = useState<number>(50);
   const [onsiteUsage, setOnsiteUsage] = useState<number>(50);
   const [generators, setGenerators] = useState<OnsiteGenerator[]>([]);
@@ -87,7 +102,8 @@ export default function Dashboard() {
     const draft = loadDraft();
     if (draft) {
       setPolygon(draft.polygon);
-      setMwUsage(draft.mwUsage);
+      setRackCount(draft.rackCount);
+      setResourceAssumptions(draft.resourceAssumptions);
       setGridUsage(draft.gridUsage);
       setOnsiteUsage(draft.onsiteUsage);
       setGenerators(draft.generators);
@@ -98,8 +114,25 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (!draftHydrated) return;
-    saveDraft({ polygon, mwUsage, gridUsage, onsiteUsage, generators, currentAnalysisId });
-  }, [draftHydrated, polygon, mwUsage, gridUsage, onsiteUsage, generators, currentAnalysisId]);
+    saveDraft({
+      polygon,
+      rackCount,
+      resourceAssumptions,
+      gridUsage,
+      onsiteUsage,
+      generators,
+      currentAnalysisId,
+    });
+  }, [
+    draftHydrated,
+    polygon,
+    rackCount,
+    resourceAssumptions,
+    gridUsage,
+    onsiteUsage,
+    generators,
+    currentAnalysisId,
+  ]);
 
   // Auto-sync the loaded saved analysis with the current form. When you load an analysis,
   // tweak (or don't tweak) anything, then navigate away and back, the saved entry in
@@ -127,7 +160,8 @@ export default function Dashboard() {
             );
           });
         if (
-          a.mwUsage === mwUsage &&
+          a.rackCount === rackCount &&
+          JSON.stringify(a.resourceAssumptions) === JSON.stringify(resourceAssumptions) &&
           a.gridUsage === gridUsage &&
           a.onsiteUsage === onsiteUsage &&
           samePolygon &&
@@ -139,7 +173,9 @@ export default function Dashboard() {
         return {
           ...a,
           polygon,
-          mwUsage,
+          rackCount,
+          resourceAssumptions,
+          mwUsage: a.mwUsage ?? 0,
           gridUsage,
           onsiteUsage,
           generators,
@@ -150,7 +186,16 @@ export default function Dashboard() {
       persistSavedAnalyses(next);
       return next;
     });
-  }, [draftHydrated, currentAnalysisId, polygon, mwUsage, gridUsage, onsiteUsage, generators]);
+  }, [
+    draftHydrated,
+    currentAnalysisId,
+    polygon,
+    rackCount,
+    resourceAssumptions,
+    gridUsage,
+    onsiteUsage,
+    generators,
+  ]);
 
   useEffect(() => {
     if (!validationError) return;
@@ -194,7 +239,9 @@ export default function Dashboard() {
           ? {
               ...a,
               polygon,
-              mwUsage,
+              rackCount,
+              resourceAssumptions,
+              mwUsage: a.mwUsage ?? 0,
               gridUsage,
               onsiteUsage,
               generators,
@@ -207,7 +254,16 @@ export default function Dashboard() {
       return;
     }
     setSaveNameModalOpen(true);
-  }, [polygon, currentAnalysisId, savedAnalyses, mwUsage, gridUsage, onsiteUsage, generators]);
+  }, [
+    polygon,
+    currentAnalysisId,
+    savedAnalyses,
+    rackCount,
+    resourceAssumptions,
+    gridUsage,
+    onsiteUsage,
+    generators,
+  ]);
 
   const handleConfirmSaveName = useCallback(
     (name: string) => {
@@ -219,7 +275,9 @@ export default function Dashboard() {
         createdAt: now,
         updatedAt: now,
         polygon,
-        mwUsage,
+        rackCount,
+        resourceAssumptions,
+        mwUsage: 0,
         gridUsage,
         onsiteUsage,
         generators,
@@ -230,7 +288,7 @@ export default function Dashboard() {
       setCurrentAnalysisId(id);
       setSaveNameModalOpen(false);
     },
-    [polygon, mwUsage, gridUsage, onsiteUsage, generators, savedAnalyses],
+    [polygon, rackCount, resourceAssumptions, gridUsage, onsiteUsage, generators, savedAnalyses],
   );
 
   const handleLoadAnalysis = useCallback(
@@ -238,7 +296,8 @@ export default function Dashboard() {
       const item = savedAnalyses.find((a) => a.id === id);
       if (!item) return;
       setPolygon(item.polygon);
-      setMwUsage(item.mwUsage);
+      setRackCount(item.rackCount ?? (Math.max(1, Math.round(((item.mwUsage ?? 0) * 1000) / 8)) || 50));
+      setResourceAssumptions(normalizeResourceAssumptions(item.resourceAssumptions));
       setGridUsage(item.gridUsage);
       setOnsiteUsage(item.onsiteUsage);
       setGenerators(item.generators ?? []);
@@ -260,7 +319,8 @@ export default function Dashboard() {
 
   const handleNewAnalysis = useCallback(() => {
     setPolygon([]);
-    setMwUsage(0);
+    setRackCount(50);
+    setResourceAssumptions(DEFAULT_RESOURCE_ASSUMPTIONS);
     setGridUsage(50);
     setOnsiteUsage(50);
     setGenerators([]);
@@ -354,10 +414,12 @@ export default function Dashboard() {
           polygon={polygon}
           setPolygon={setPolygon}
           setCenterOn={setCenterOn}
-          mwUsage={mwUsage}
+          rackCount={rackCount}
+          setRackCount={setRackCount}
+          resourceAssumptions={resourceAssumptions}
+          setResourceAssumptions={setResourceAssumptions}
           gridUsage={gridUsage}
           onsiteUsage={onsiteUsage}
-          setMwUsage={setMwUsage}
           setGridUsage={setGridUsageLinked}
           setOnsiteUsage={setOnsiteUsageLinked}
           generators={generators}

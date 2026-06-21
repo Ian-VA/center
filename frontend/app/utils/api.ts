@@ -33,6 +33,28 @@ export function isComputeError(value: ComputeResponse): value is ComputeError {
   return typeof (value as ComputeError).error === 'string';
 }
 
+async function parseJsonResponse<T>(res: Response, fallback: T): Promise<T | ComputeError> {
+  const text = await res.text();
+  let parsed: unknown;
+  try {
+    parsed = text ? JSON.parse(text) : null;
+  } catch {
+    if (!res.ok) {
+      const snippet = text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500);
+      return { error: `Backend ${res.status}: ${snippet || '(empty body)'}` };
+    }
+    return { error: `Invalid response from backend (status ${res.status})` };
+  }
+  if (!res.ok) {
+    const message =
+      parsed && typeof parsed === 'object' && parsed !== null && 'error' in parsed
+        ? String((parsed as { error: unknown }).error)
+        : `Backend returned status ${res.status}`;
+    return { error: message };
+  }
+  return (parsed ?? fallback) as T;
+}
+
 export interface ImpactSummary {
   totalUsdPerYear: number;
   countyCount: number;
@@ -140,6 +162,86 @@ export function isPermitError(value: PermitPredictionResponse): value is Compute
   return typeof (value as ComputeError).error === 'string';
 }
 
+export interface ResourceUsageRequest {
+  num_racks: number;
+  rack_preset: string;
+  kw_peak_per_rack: number;
+  server_utilization: number;
+  server_idle_power_fraction: number;
+  data_hall_sqft: number;
+  redundancy: string;
+  cooling_type: string;
+  rated_cop?: number | null;
+  hot_aisle_containment: boolean;
+  climate_zone: string;
+  altitude_ft: number;
+  electric_rate: number;
+  egrid_region: string;
+  cooling_tower_cycles_of_concentration: number;
+  cooling_tower_drift_fraction: number;
+  site_wue_l_per_kwh?: number | null;
+}
+
+export interface ResourceUsageResult {
+  it_peak_kw: number;
+  it_average_kw: number;
+  total_facility_power_kw: number;
+  annual_it_energy_kwh: number;
+  annual_facility_energy_kwh: number;
+  pue: number;
+  pue_rating: string;
+  calculated_wue_l_per_kwh: number;
+  site_wue_l_per_kwh: number;
+  water_usage_liters_per_year: number;
+  water_usage_gallons_per_year: number;
+  evaporation_water_liters_per_year: number;
+  blowdown_water_liters_per_year: number;
+  drift_water_liters_per_year: number;
+  humidification_water_liters_per_year: number;
+  water_model: string;
+  annual_cost: number;
+  annual_co2_metric_tons: number;
+  warnings?: string[];
+}
+
+export type ResourceUsageResponse = ResourceUsageResult | ComputeError;
+
+export function isResourceUsageError(value: ResourceUsageResponse): value is ComputeError {
+  return typeof (value as ComputeError).error === 'string';
+}
+
+export interface PriceChangeRequest {
+  current_price: number;
+  new_demand: number;
+  location?: string;
+  resource?: 'water' | 'electricity';
+  old_demand?: number;
+  supply_elasticity?: number;
+  demand_elasticity?: number;
+}
+
+export interface PriceChangeResult {
+  price_change: number;
+  current_price: number;
+  old_demand: number;
+  new_demand: number;
+  supply_elasticity: number;
+  demand_elasticity: number;
+  location?: string;
+  resource?: string;
+}
+
+export type PriceChangeResponse = PriceChangeResult | ComputeError;
+
+export function isPriceChangeError(value: PriceChangeResponse): value is ComputeError {
+  return typeof (value as ComputeError).error === 'string';
+}
+
+export const LA_BASELINE_DEMAND = {
+  electricityKwhPerYear: 64_896e9,
+  waterLitersPerYear: 1_489_564 * 1.233e6,
+};
+
 export async function predictPermit(
   req: PermitPredictionRequest,
 ): Promise<PermitPredictionResponse> {
@@ -148,25 +250,7 @@ export async function predictPermit(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(req),
   });
-  const text = await res.text();
-  let parsed: unknown;
-  try {
-    parsed = text ? JSON.parse(text) : null;
-  } catch {
-    if (!res.ok) {
-      const snippet = text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500);
-      return { error: `Backend ${res.status}: ${snippet || '(empty body)'}` };
-    }
-    return { error: `Invalid response from backend (status ${res.status})` };
-  }
-  if (!res.ok) {
-    const message =
-      parsed && typeof parsed === 'object' && parsed !== null && 'error' in parsed
-        ? String((parsed as { error: unknown }).error)
-        : `Backend returned status ${res.status}`;
-    return { error: message };
-  }
-  return parsed as PermitPrediction;
+  return parseJsonResponse<PermitPrediction>(res, {} as PermitPrediction);
 }
 
 export async function computeImpact(req: ComputeRequest): Promise<ComputeResponse> {
@@ -175,23 +259,27 @@ export async function computeImpact(req: ComputeRequest): Promise<ComputeRespons
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(req),
   });
-  const text = await res.text();
-  let parsed: unknown;
-  try {
-    parsed = text ? JSON.parse(text) : null;
-  } catch {
-    if (!res.ok) {
-      const snippet = text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500);
-      return { error: `Backend ${res.status}: ${snippet || '(empty body)'}` };
-    }
-    return { error: `Invalid response from backend (status ${res.status})` };
-  }
-  if (!res.ok) {
-    const message =
-      parsed && typeof parsed === 'object' && parsed !== null && 'error' in parsed
-        ? String((parsed as { error: unknown }).error)
-        : `Backend returned status ${res.status}`;
-    return { error: message };
-  }
-  return (parsed ?? { health_cost_by_county: [], naaqs_violations: [] }) as ComputeResult;
+  return parseJsonResponse<ComputeResult>(res, { health_cost_by_county: [], naaqs_violations: [] });
+}
+
+export async function calculateResourceUsage(
+  req: ResourceUsageRequest,
+): Promise<ResourceUsageResponse> {
+  const res = await fetch('/api/resource-usage', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  return parseJsonResponse<ResourceUsageResult>(res, {} as ResourceUsageResult);
+}
+
+export async function calculatePriceChange(
+  req: PriceChangeRequest,
+): Promise<PriceChangeResponse> {
+  const res = await fetch('/api/price-change', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  return parseJsonResponse<PriceChangeResult>(res, {} as PriceChangeResult);
 }

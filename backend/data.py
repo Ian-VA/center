@@ -18,22 +18,22 @@ NUM_STACK_TYPES = 4
 ROOT = Path(__file__).parent
 
 CSV_PATHS = {
-    'CR_FUNCTIONS': Path('COBRA/input files/default data/default_CR_functions.csv'),
-    'DICT': Path('COBRA/input files/data dictionary/SOURCEINDX to FIPS crosswalk.csv'),
-    'TIERS': Path('COBRA/input files/data dictionary/EmissionsTier Definitions.csv'),
-    'STACK_HEIGHTS': Path('COBRA/input files/data dictionary/typeindx - stack heights.csv'),
-    'POPULATION_2016': Path('COBRA/input files/default data/default_2016_population_data.csv'),
-    'POPULATION_2023': Path('COBRA/input files/default data/default_2023_population_data.csv'),
-    'POPULATION_2028': Path('COBRA/input files/default data/default_2028_population_data.csv'),
-    'INCIDENCE_2016': Path('COBRA/input files/default data/default_2016_incidence_data.csv'),
-    'INCIDENCE_2023': Path('COBRA/input files/default data/default_2023_incidence_data.csv'),
-    'INCIDENCE_2028': Path('COBRA/input files/default data/default_2028_incidence_data.csv'),
-    'VALUATION_2016': Path('COBRA/input files/default data/default_2016_valuation_data.csv'),
-    'VALUATION_2023': Path('COBRA/input files/default data/default_2023_valuation_data.csv'),
-    'VALUATION_2028': Path('COBRA/input files/default data/default_2028_valuation_data.csv'),
-    'EMISSIONS_2016': Path('COBRA/input files/emissions/Emissions_2016.csv'),
-    'EMISSIONS_2023': Path('COBRA/input files/emissions/Emissions_2023.csv'),
-    'EMISSIONS_2028': Path('COBRA/input files/emissions/Emissions_2028.csv'),
+    'CR_FUNCTIONS': ROOT / 'COBRA' / 'input files' / 'default data' / 'default_CR_functions.csv',
+    'DICT': ROOT / 'COBRA' / 'input files' / 'data dictionary' / 'SOURCEINDX to FIPS crosswalk.csv',
+    'TIERS': ROOT / 'COBRA' / 'input files' / 'data dictionary' / 'EmissionsTier Definitions.csv',
+    'STACK_HEIGHTS': ROOT / 'COBRA' / 'input files' / 'data dictionary' / 'typeindx - stack heights.csv',
+    'POPULATION_2016': ROOT / 'COBRA' / 'input files' / 'default data' / 'default_2016_population_data.csv',
+    'POPULATION_2023': ROOT / 'COBRA' / 'input files' / 'default data' / 'default_2023_population_data.csv',
+    'POPULATION_2028': ROOT / 'COBRA' / 'input files' / 'default data' / 'default_2028_population_data.csv',
+    'INCIDENCE_2016': ROOT / 'COBRA' / 'input files' / 'default data' / 'default_2016_incidence_data.csv',
+    'INCIDENCE_2023': ROOT / 'COBRA' / 'input files' / 'default data' / 'default_2023_incidence_data.csv',
+    'INCIDENCE_2028': ROOT / 'COBRA' / 'input files' / 'default data' / 'default_2028_incidence_data.csv',
+    'VALUATION_2016': ROOT / 'COBRA' / 'input files' / 'default data' / 'default_2016_valuation_data.csv',
+    'VALUATION_2023': ROOT / 'COBRA' / 'input files' / 'default data' / 'default_2023_valuation_data.csv',
+    'VALUATION_2028': ROOT / 'COBRA' / 'input files' / 'default data' / 'default_2028_valuation_data.csv',
+    'EMISSIONS_2016': ROOT / 'COBRA' / 'input files' / 'emissions' / 'Emissions_2016.csv',
+    'EMISSIONS_2023': ROOT / 'COBRA' / 'input files' / 'emissions' / 'Emissions_2023.csv',
+    'EMISSIONS_2028': ROOT / 'COBRA' / 'input files' / 'emissions' / 'Emissions_2028.csv',
 }
 
 

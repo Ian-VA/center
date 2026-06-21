@@ -17,15 +17,27 @@ import type { SavedAnalysis } from '../utils/savedAnalyses';
 import { encodeGenerators, type OnsiteGenerator } from '../utils/generators';
 import { approvalLikelihood } from '../utils/api';
 import NameInputModal from './NameInputModal';
+import {
+  CLIMATE_ZONE_OPTIONS,
+  COOLING_TYPE_OPTIONS,
+  EGRID_REGION_OPTIONS,
+  encodeResourceAssumptions,
+  peakKwPerRack,
+  RACK_PRESET_OPTIONS,
+  REDUNDANCY_OPTIONS,
+  type ResourceAssumptions,
+} from '../utils/resourceAssumptions';
 
 interface SidebarFormProps {
   polygon: LatLng[];
   setPolygon: (polygon: LatLng[]) => void;
   setCenterOn: (point: LatLng | undefined) => void;
-  mwUsage: number;
+  rackCount: number;
+  setRackCount: (value: number) => void;
+  resourceAssumptions: ResourceAssumptions;
+  setResourceAssumptions: (value: ResourceAssumptions) => void;
   gridUsage: number;
   onsiteUsage: number;
-  setMwUsage: (value: number) => void;
   setGridUsage: (value: number) => void;
   setOnsiteUsage: (value: number) => void;
   generators: OnsiteGenerator[];
@@ -80,10 +92,12 @@ const SidebarForm: React.FC<SidebarFormProps> = ({
   polygon,
   setPolygon,
   setCenterOn,
-  mwUsage,
+  rackCount,
+  setRackCount,
+  resourceAssumptions,
+  setResourceAssumptions,
   gridUsage,
   onsiteUsage,
-  setMwUsage,
   setGridUsage,
   setOnsiteUsage,
   generators,
@@ -104,7 +118,7 @@ const SidebarForm: React.FC<SidebarFormProps> = ({
   const [savedMenuOpen, setSavedMenuOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<SavedAnalysis | null>(null);
 
-  const [mwInput, setMwInput] = useState<string>(mwUsage ? String(mwUsage) : '');
+  const [rackInput, setRackInput] = useState<string>(rackCount ? String(rackCount) : '');
   const [gridInput, setGridInput] = useState<string>(String(gridUsage));
   const [onsiteInput, setOnsiteInput] = useState<string>(String(onsiteUsage));
 
@@ -115,11 +129,11 @@ const SidebarForm: React.FC<SidebarFormProps> = ({
   };
 
   useEffect(() => {
-    if (parseInput(mwInput) !== mwUsage) {
-      setMwInput(mwUsage ? String(mwUsage) : '');
+    if (parseInput(rackInput) !== rackCount) {
+      setRackInput(rackCount ? String(rackCount) : '');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mwUsage]);
+  }, [rackCount]);
 
   useEffect(() => {
     if (parseInput(gridInput) !== gridUsage) {
@@ -138,9 +152,13 @@ const SidebarForm: React.FC<SidebarFormProps> = ({
   const areaSqFt = useMemo(() => polygonAreaSquareFeet(polygon), [polygon]);
   const polygonComplete = polygon.length >= 3;
 
+  const estimatedPeakMW = useMemo(
+    () => Math.max(0, (rackCount * peakKwPerRack(resourceAssumptions)) / 1000),
+    [rackCount, resourceAssumptions],
+  );
   const requiredOnsiteMW = useMemo(
-    () => Math.max(0, (mwUsage * onsiteUsage) / 100),
-    [mwUsage, onsiteUsage],
+    () => Math.max(0, (estimatedPeakMW * onsiteUsage) / 100),
+    [estimatedPeakMW, onsiteUsage],
   );
   // Only PRIME generators provide continuous onsite power. Backup gens run a few hours
   // a year — they don't satisfy the onsite-share requirement, but they still count
@@ -165,7 +183,11 @@ const SidebarForm: React.FC<SidebarFormProps> = ({
   const onsiteCovered =
     onsiteUsage === 0 ||
     (placedPrimeCount > 0 && onsiteShortfall <= 1e-6);
-  const canRunAnalysis = polygonComplete && onsiteCovered;
+  const canRunAnalysis = polygonComplete && onsiteCovered && rackCount > 0;
+
+  const updateResourceAssumptions = (patch: Partial<ResourceAssumptions>) => {
+    setResourceAssumptions({ ...resourceAssumptions, ...patch });
+  };
 
   const overlaps = useMemo(() => {
     if (!polygonComplete) return [] as { category: SensitiveCategory; label: string; feature: SensitiveFeature }[];
@@ -226,7 +248,8 @@ const SidebarForm: React.FC<SidebarFormProps> = ({
     const params = new URLSearchParams({
       polygon: encodePolygon(polygon),
       area: String(Math.round(areaSqFt)),
-      mw: String(mwUsage),
+      racks: String(rackCount),
+      resource: encodeResourceAssumptions(resourceAssumptions),
       grid: String(gridUsage),
       onsite: String(onsiteUsage),
       generators: encodeGenerators(generators),
@@ -588,18 +611,319 @@ const SidebarForm: React.FC<SidebarFormProps> = ({
         )}
 
         <div>
-          <label className={labelClass} htmlFor="mw">
-            MW Usage
+          <label className={labelClass} htmlFor="racks">
+            Rack count
           </label>
           <input
-            id="mw"
+            id="racks"
             type="number"
-            inputMode="decimal"
-            placeholder="e.g. 25"
+            inputMode="numeric"
+            min={1}
+            placeholder="e.g. 250"
             className={inputClass}
             required
-            {...numberInputProps(mwInput, setMwInput, setMwUsage)}
+            {...numberInputProps(rackInput, setRackInput, setRackCount)}
           />
+          <p className="mt-1.5 text-xs text-foreground/50">
+            Estimated peak IT load: {estimatedPeakMW.toFixed(2)} MW
+          </p>
+        </div>
+
+        <div className="rounded-xl border border-border bg-surface-muted/60 p-4">
+          <div className="mb-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-foreground/60">
+              Resource assumptions
+            </p>
+          </div>
+          <div className="space-y-3">
+            <div>
+              <label className={labelClass} htmlFor="rack-preset">
+                Rack density
+              </label>
+              <select
+                id="rack-preset"
+                className={inputClass}
+                value={resourceAssumptions.rackPreset}
+                onChange={(e) =>
+                  updateResourceAssumptions({
+                    rackPreset: e.target.value as ResourceAssumptions['rackPreset'],
+                  })
+                }
+              >
+                {RACK_PRESET_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {resourceAssumptions.rackPreset === 'custom' && (
+              <div>
+                <label className={labelClass} htmlFor="kw-rack">
+                  Peak kW / rack
+                </label>
+                <input
+                  id="kw-rack"
+                  type="number"
+                  inputMode="decimal"
+                  className={inputClass}
+                  value={resourceAssumptions.kwPeakPerRack}
+                  onChange={(e) =>
+                    updateResourceAssumptions({ kwPeakPerRack: Number(e.target.value) || 0 })
+                  }
+                />
+              </div>
+            )}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className={labelClass} htmlFor="utilization">
+                  Utilization
+                </label>
+                <input
+                  id="utilization"
+                  type="number"
+                  inputMode="decimal"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  className={inputClass}
+                  value={resourceAssumptions.serverUtilization}
+                  onChange={(e) =>
+                    updateResourceAssumptions({ serverUtilization: Number(e.target.value) || 0 })
+                  }
+                />
+              </div>
+              <div>
+                <label className={labelClass} htmlFor="idle-fraction">
+                  Idle fraction
+                </label>
+                <input
+                  id="idle-fraction"
+                  type="number"
+                  inputMode="decimal"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  className={inputClass}
+                  value={resourceAssumptions.serverIdlePowerFraction}
+                  onChange={(e) =>
+                    updateResourceAssumptions({
+                      serverIdlePowerFraction: Number(e.target.value) || 0,
+                    })
+                  }
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className={labelClass} htmlFor="cooling-type">
+                  Cooling
+                </label>
+                <select
+                  id="cooling-type"
+                  className={inputClass}
+                  value={resourceAssumptions.coolingType}
+                  onChange={(e) =>
+                    updateResourceAssumptions({
+                      coolingType: e.target.value as ResourceAssumptions['coolingType'],
+                    })
+                  }
+                >
+                  {COOLING_TYPE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className={labelClass} htmlFor="climate-zone">
+                  Climate
+                </label>
+                <select
+                  id="climate-zone"
+                  className={inputClass}
+                  value={resourceAssumptions.climateZone}
+                  onChange={(e) =>
+                    updateResourceAssumptions({
+                      climateZone: e.target.value as ResourceAssumptions['climateZone'],
+                    })
+                  }
+                >
+                  {CLIMATE_ZONE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className={labelClass} htmlFor="redundancy">
+                  Redundancy
+                </label>
+                <select
+                  id="redundancy"
+                  className={inputClass}
+                  value={resourceAssumptions.redundancy}
+                  onChange={(e) =>
+                    updateResourceAssumptions({
+                      redundancy: e.target.value as ResourceAssumptions['redundancy'],
+                    })
+                  }
+                >
+                  {REDUNDANCY_OPTIONS.map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className={labelClass} htmlFor="egrid">
+                  eGRID
+                </label>
+                <select
+                  id="egrid"
+                  className={inputClass}
+                  value={resourceAssumptions.egridRegion}
+                  onChange={(e) => updateResourceAssumptions({ egridRegion: e.target.value })}
+                >
+                  {EGRID_REGION_OPTIONS.map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className={labelClass} htmlFor="altitude">
+                  Altitude ft
+                </label>
+                <input
+                  id="altitude"
+                  type="number"
+                  inputMode="decimal"
+                  className={inputClass}
+                  value={resourceAssumptions.altitudeFt}
+                  onChange={(e) =>
+                    updateResourceAssumptions({ altitudeFt: Number(e.target.value) || 0 })
+                  }
+                />
+              </div>
+              <div>
+                <label className={labelClass} htmlFor="electric-rate">
+                  $ / kWh
+                </label>
+                <input
+                  id="electric-rate"
+                  type="number"
+                  inputMode="decimal"
+                  step={0.001}
+                  className={inputClass}
+                  value={resourceAssumptions.electricRate}
+                  onChange={(e) =>
+                    updateResourceAssumptions({ electricRate: Number(e.target.value) || 0 })
+                  }
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className={labelClass} htmlFor="rated-cop">
+                  Rated COP
+                </label>
+                <input
+                  id="rated-cop"
+                  type="number"
+                  inputMode="decimal"
+                  step={0.1}
+                  placeholder="default"
+                  className={inputClass}
+                  value={resourceAssumptions.ratedCop ?? ''}
+                  onChange={(e) =>
+                    updateResourceAssumptions({
+                      ratedCop: e.target.value === '' ? null : Number(e.target.value) || null,
+                    })
+                  }
+                />
+              </div>
+              <div>
+                <label className={labelClass} htmlFor="wue-override">
+                  WUE override
+                </label>
+                <input
+                  id="wue-override"
+                  type="number"
+                  inputMode="decimal"
+                  step={0.01}
+                  placeholder="calculated"
+                  className={inputClass}
+                  value={resourceAssumptions.siteWueLPerKwh ?? ''}
+                  onChange={(e) =>
+                    updateResourceAssumptions({
+                      siteWueLPerKwh:
+                        e.target.value === '' ? null : Number(e.target.value) || null,
+                    })
+                  }
+                />
+              </div>
+            </div>
+            <label className="flex items-center gap-2 text-xs font-semibold text-foreground/70">
+              <input
+                type="checkbox"
+                checked={resourceAssumptions.hotAisleContainment}
+                onChange={(e) =>
+                  updateResourceAssumptions({ hotAisleContainment: e.target.checked })
+                }
+              />
+              Hot-aisle containment
+            </label>
+            {(resourceAssumptions.coolingType === 'chilled-water' ||
+              resourceAssumptions.coolingType === 'evaporative') && (
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelClass} htmlFor="cycles">
+                    Cycles
+                  </label>
+                  <input
+                    id="cycles"
+                    type="number"
+                    inputMode="decimal"
+                    step={0.5}
+                    className={inputClass}
+                    value={resourceAssumptions.coolingTowerCyclesOfConcentration}
+                    onChange={(e) =>
+                      updateResourceAssumptions({
+                        coolingTowerCyclesOfConcentration: Number(e.target.value) || 0,
+                      })
+                    }
+                  />
+                </div>
+                <div>
+                  <label className={labelClass} htmlFor="drift">
+                    Drift fraction
+                  </label>
+                  <input
+                    id="drift"
+                    type="number"
+                    inputMode="decimal"
+                    step={0.001}
+                    className={inputClass}
+                    value={resourceAssumptions.coolingTowerDriftFraction}
+                    onChange={(e) =>
+                      updateResourceAssumptions({
+                        coolingTowerDriftFraction: Number(e.target.value) || 0,
+                      })
+                    }
+                  />
+                </div>
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="grid grid-cols-2 items-end gap-3">
@@ -657,7 +981,7 @@ const SidebarForm: React.FC<SidebarFormProps> = ({
                 <>
                   Prime generators must cover{' '}
                   <span className="font-mono tabular-nums">{requiredOnsiteMW.toFixed(1)} MW</span>{' '}
-                  ({onsiteUsage}% of {mwUsage} MW).
+                  ({onsiteUsage}% of estimated {estimatedPeakMW.toFixed(1)} MW peak IT).
                   <span className="block mt-0.5">
                     Placed prime power:{' '}
                     <span className="font-mono tabular-nums">{placedPrimeMW.toFixed(1)} MW</span>{' '}

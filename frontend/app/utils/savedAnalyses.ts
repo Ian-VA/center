@@ -1,6 +1,7 @@
 import type { LatLng } from './area';
 import type { OnsiteGenerator } from './generators';
-import type { ComputeResult, PermitPrediction } from './api';
+import type { ComputeResult, PermitPrediction, PriceChangeResult, ResourceUsageResult } from './api';
+import type { ResourceAssumptions } from './resourceAssumptions';
 
 export interface SavedResult {
   computedAt: number;
@@ -20,6 +21,9 @@ export interface SavedResult {
    *  COBRA call and the Sonnet call (~30s + ~$0.05). */
   fullResult?: ComputeResult;
   permitPrediction?: PermitPrediction;
+  resourceUsage?: ResourceUsageResult;
+  waterPriceChange?: PriceChangeResult;
+  electricityPriceChange?: PriceChangeResult;
 }
 
 export interface SavedAnalysis {
@@ -28,6 +32,9 @@ export interface SavedAnalysis {
   createdAt: number;
   updatedAt: number;
   polygon: LatLng[];
+  rackCount?: number;
+  resourceAssumptions?: ResourceAssumptions;
+  /** Deprecated legacy sizing field. Older saved analyses may still contain it. */
   mwUsage: number;
   gridUsage: number;
   onsiteUsage: number;

@@ -10,7 +10,7 @@ const CountyChoroplethMap = dynamic(
 );
 import NameInputModal from '../components/NameInputModal';
 import { useRouter } from 'next/navigation';
-import { useEffect, useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useState } from 'react';
 import {
   decodePolygon,
   formatSquareFeet,
@@ -21,14 +21,22 @@ import { decodeGenerators, type OnsiteGenerator } from '../utils/generators';
 import {
   APPROVAL_LIKELIHOOD_TONE,
   approvalLikelihood,
+  calculatePriceChange,
+  calculateResourceUsage,
   computeImpact,
   isComputeError,
   isPermitError,
+  isPriceChangeError,
+  isResourceUsageError,
+  LA_BASELINE_DEMAND,
   predictPermit,
   summarizeResult,
   type ComputeResult,
   type PermitPrediction,
+  type PriceChangeResult,
+  type ResourceUsageResult,
 } from '../utils/api';
+import { decodeResourceAssumptions } from '../utils/resourceAssumptions';
 import { useLiveLayers } from '../hooks/useLiveLayers';
 import {
   generateAnalysisId,
@@ -44,7 +52,12 @@ const usdFormatter = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 0,
 });
 
-export default function Analysis() {
+const compactNumber = new Intl.NumberFormat('en-US', {
+  maximumFractionDigits: 1,
+  notation: 'compact',
+});
+
+function AnalysisContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const { liveData, liveStatus } = useLiveLayers();
@@ -57,7 +70,19 @@ export default function Analysis() {
     [polygon],
   );
 
-  const mw = searchParams.get('mw');
+  const racksParam = searchParams.get('racks');
+  const legacyMw = searchParams.get('mw');
+  const rackCount = useMemo(() => {
+    const explicit = Number(racksParam);
+    if (Number.isFinite(explicit) && explicit > 0) return explicit;
+    const legacy = Number(legacyMw);
+    if (Number.isFinite(legacy) && legacy > 0) return Math.max(1, Math.round((legacy * 1000) / 8));
+    return 0;
+  }, [racksParam, legacyMw]);
+  const resourceAssumptions = useMemo(
+    () => decodeResourceAssumptions(searchParams.get('resource')),
+    [searchParams],
+  );
   const grid = searchParams.get('grid');
   const onsite = searchParams.get('onsite');
   const generators: OnsiteGenerator[] = useMemo(
@@ -74,7 +99,13 @@ export default function Analysis() {
     try {
       const entry = loadSavedAnalyses().find((a) => a.id === savedId);
       if (entry?.result?.fullResult && entry.result.permitPrediction) {
-        return { result: entry.result.fullResult, permit: entry.result.permitPrediction };
+        return {
+          result: entry.result.fullResult,
+          permit: entry.result.permitPrediction,
+          resourceUsage: entry.result.resourceUsage,
+          waterPrice: entry.result.waterPriceChange,
+          electricityPrice: entry.result.electricityPriceChange,
+        };
       }
     } catch {}
     return null;
@@ -90,13 +121,78 @@ export default function Analysis() {
   );
   const [permitLoading, setPermitLoading] = useState(false);
   const [permitError, setPermitError] = useState<string | null>(null);
+  const [resourceUsage, setResourceUsage] = useState<ResourceUsageResult | null>(
+    savedHydration?.resourceUsage ?? null,
+  );
+  const [resourceLoading, setResourceLoading] = useState(false);
+  const [resourceError, setResourceError] = useState<string | null>(null);
+  const [waterPrice, setWaterPrice] = useState<PriceChangeResult | null>(
+    savedHydration?.waterPrice ?? null,
+  );
+  const [electricityPrice, setElectricityPrice] = useState<PriceChangeResult | null>(
+    savedHydration?.electricityPrice ?? null,
+  );
+  const [priceLoading, setPriceLoading] = useState(false);
+  const [priceError, setPriceError] = useState<string | null>(null);
   const [savedToast, setSavedToast] = useState<string | null>(null);
   const [saveModalOpen, setSaveModalOpen] = useState(false);
 
   useEffect(() => {
+    if (savedHydration?.resourceUsage) return;
+    if (rackCount <= 0) return;
+
+    const ac = new AbortController();
+    setResourceLoading(true);
+    setResourceError(null);
+    setResourceUsage(null);
+    setResult(null);
+    setPermit(null);
+    setWaterPrice(null);
+    setElectricityPrice(null);
+
+    calculateResourceUsage({
+      num_racks: rackCount,
+      rack_preset: resourceAssumptions.rackPreset,
+      kw_peak_per_rack: resourceAssumptions.kwPeakPerRack,
+      server_utilization: resourceAssumptions.serverUtilization,
+      server_idle_power_fraction: resourceAssumptions.serverIdlePowerFraction,
+      data_hall_sqft: areaSqFt,
+      redundancy: resourceAssumptions.redundancy,
+      cooling_type: resourceAssumptions.coolingType,
+      rated_cop: resourceAssumptions.ratedCop,
+      hot_aisle_containment: resourceAssumptions.hotAisleContainment,
+      climate_zone: resourceAssumptions.climateZone,
+      altitude_ft: resourceAssumptions.altitudeFt,
+      electric_rate: resourceAssumptions.electricRate,
+      egrid_region: resourceAssumptions.egridRegion,
+      cooling_tower_cycles_of_concentration:
+        resourceAssumptions.coolingTowerCyclesOfConcentration,
+      cooling_tower_drift_fraction: resourceAssumptions.coolingTowerDriftFraction,
+      site_wue_l_per_kwh: resourceAssumptions.siteWueLPerKwh,
+    })
+      .then((res) => {
+        if (ac.signal.aborted) return;
+        if (isResourceUsageError(res)) {
+          setResourceError(res.error);
+        } else {
+          setResourceUsage(res);
+        }
+      })
+      .catch((err: unknown) => {
+        if (ac.signal.aborted) return;
+        setResourceError(err instanceof Error ? err.message : 'Unknown error');
+      })
+      .finally(() => {
+        if (!ac.signal.aborted) setResourceLoading(false);
+      });
+
+    return () => ac.abort();
+  }, [areaSqFt, rackCount, resourceAssumptions, savedHydration]);
+
+  useEffect(() => {
     if (savedHydration) return;
-    if (!centroid || !mw || !onsite) return;
-    const totalPower = Number(mw);
+    if (!centroid || !onsite || !resourceUsage) return;
+    const totalPower = resourceUsage.total_facility_power_kw / 1000;
     const onsitePct = Number(onsite);
     if (!Number.isFinite(totalPower) || totalPower <= 0) return;
 
@@ -133,7 +229,7 @@ export default function Analysis() {
       });
 
     return () => ac.abort();
-  }, [centroid, mw, onsite, generators, savedHydration]);
+  }, [centroid, onsite, generators, savedHydration, resourceUsage]);
 
   const summary = useMemo(() => (result ? summarizeResult(result) : null), [result]);
 
@@ -143,8 +239,8 @@ export default function Analysis() {
   // the COBRA health-cost total (different metric).
   useEffect(() => {
     if (savedHydration) return;
-    if (!centroid || !mw) return;
-    const totalPower = Number(mw);
+    if (!centroid || !resourceUsage) return;
+    const totalPower = resourceUsage.total_facility_power_kw / 1000;
     if (!Number.isFinite(totalPower) || totalPower <= 0) return;
     if (!result) return; // wait for the health-cost computation
 
@@ -176,7 +272,58 @@ export default function Analysis() {
       });
 
     return () => ac.abort();
-  }, [centroid, mw, result, savedHydration]);
+  }, [centroid, result, savedHydration, resourceUsage]);
+
+  useEffect(() => {
+    if (savedHydration?.waterPrice && savedHydration?.electricityPrice) return;
+    if (!resourceUsage) return;
+
+    const ac = new AbortController();
+    setPriceLoading(true);
+    setPriceError(null);
+    setWaterPrice(null);
+    setElectricityPrice(null);
+
+    Promise.all([
+      calculatePriceChange({
+        current_price: 0.01,
+        location: 'LA',
+        resource: 'water',
+        new_demand:
+          LA_BASELINE_DEMAND.waterLitersPerYear + resourceUsage.water_usage_liters_per_year,
+      }),
+      calculatePriceChange({
+        current_price: 0.17,
+        location: 'LA',
+        resource: 'electricity',
+        new_demand:
+          LA_BASELINE_DEMAND.electricityKwhPerYear +
+          resourceUsage.annual_facility_energy_kwh,
+      }),
+    ])
+      .then(([water, electricity]) => {
+        if (ac.signal.aborted) return;
+        if (isPriceChangeError(water)) {
+          setPriceError(water.error);
+        } else {
+          setWaterPrice(water);
+        }
+        if (isPriceChangeError(electricity)) {
+          setPriceError(electricity.error);
+        } else {
+          setElectricityPrice(electricity);
+        }
+      })
+      .catch((err: unknown) => {
+        if (ac.signal.aborted) return;
+        setPriceError(err instanceof Error ? err.message : 'Unknown error');
+      })
+      .finally(() => {
+        if (!ac.signal.aborted) setPriceLoading(false);
+      });
+
+    return () => ac.abort();
+  }, [resourceUsage, savedHydration]);
 
   const costByFips = useMemo(() => {
     const map: Record<string, number> = {};
@@ -208,6 +355,9 @@ export default function Analysis() {
       costByFips,
       fullResult: result ?? undefined,
       permitPrediction: permit ?? undefined,
+      resourceUsage: resourceUsage ?? undefined,
+      waterPriceChange: waterPrice ?? undefined,
+      electricityPriceChange: electricityPrice ?? undefined,
       ...(permit && {
         permitDays: permit.expected_days_to_first_approval,
         permitDaysCiLow: permit.days_ci_low,
@@ -226,7 +376,9 @@ export default function Analysis() {
       createdAt: now,
       updatedAt: now,
       polygon,
-      mwUsage: Number(mw) || 0,
+      rackCount,
+      resourceAssumptions,
+      mwUsage: resourceUsage ? resourceUsage.total_facility_power_kw / 1000 : 0,
       gridUsage: Number(grid) || 0,
       onsiteUsage: Number(onsite) || 0,
       generators,
@@ -276,15 +428,37 @@ export default function Analysis() {
               </div>
               <div className="min-w-0">
                 <dt className="text-xs font-semibold uppercase tracking-[0.14em] text-foreground/50">
-                  MW usage
+                  Rack count
                 </dt>
-                <dd className="mt-1 break-all text-foreground tabular-nums [overflow-wrap:anywhere]">{mw} MW</dd>
+                <dd className="mt-1 break-all text-foreground tabular-nums [overflow-wrap:anywhere]">
+                  {rackCount.toLocaleString()}
+                </dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-xs font-semibold uppercase tracking-[0.14em] text-foreground/50">
+                  Derived facility MW
+                </dt>
+                <dd className="mt-1 break-all text-foreground tabular-nums [overflow-wrap:anywhere]">
+                  {resourceUsage
+                    ? `${(resourceUsage.total_facility_power_kw / 1000).toFixed(2)} MW`
+                    : '—'}
+                </dd>
               </div>
               <div className="min-w-0">
                 <dt className="text-xs font-semibold uppercase tracking-[0.14em] text-foreground/50">
                   Grid / Onsite
                 </dt>
                 <dd className="mt-1 break-all text-foreground tabular-nums [overflow-wrap:anywhere]">{grid}% / {onsite}%</dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-xs font-semibold uppercase tracking-[0.14em] text-foreground/50">
+                  IT peak / avg
+                </dt>
+                <dd className="mt-1 break-all text-foreground tabular-nums [overflow-wrap:anywhere]">
+                  {resourceUsage
+                    ? `${(resourceUsage.it_peak_kw / 1000).toFixed(2)} / ${(resourceUsage.it_average_kw / 1000).toFixed(2)} MW`
+                    : '—'}
+                </dd>
               </div>
               <div className="col-span-2 min-w-0">
                 <dt className="text-xs font-semibold uppercase tracking-[0.14em] text-foreground/50">
@@ -328,6 +502,117 @@ export default function Analysis() {
               <p className="mt-3 text-sm text-foreground/60">
                 Provide MW, onsite split, and a polygon to compute impact.
               </p>
+            )}
+          </div>
+
+          <div className="rounded-2xl border border-border bg-surface p-6 shadow-sm">
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-foreground/50">
+              Resource usage
+            </p>
+            {resourceLoading && (
+              <p className="mt-3 text-sm text-foreground/60">Calculating energy and water use…</p>
+            )}
+            {resourceError && (
+              <p className="mt-3 text-sm text-rose-700 dark:text-rose-300">
+                {resourceError}
+              </p>
+            )}
+            {resourceUsage && !resourceLoading && !resourceError && (
+              <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-foreground/50">
+                    Annual energy
+                  </p>
+                  <p className="mt-1 font-mono text-base tabular-nums text-foreground">
+                    {compactNumber.format(resourceUsage.annual_facility_energy_kwh)} kWh
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-foreground/50">
+                    PUE
+                  </p>
+                  <p className="mt-1 font-mono text-base tabular-nums text-foreground">
+                    {resourceUsage.pue.toFixed(2)}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-foreground/50">
+                    Annual water
+                  </p>
+                  <p className="mt-1 font-mono text-base tabular-nums text-foreground">
+                    {compactNumber.format(resourceUsage.water_usage_gallons_per_year)} gal
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-foreground/50">
+                    WUE
+                  </p>
+                  <p className="mt-1 font-mono text-base tabular-nums text-foreground">
+                    {resourceUsage.site_wue_l_per_kwh.toFixed(3)} L/kWh
+                  </p>
+                </div>
+                <div className="col-span-2 rounded-lg border border-border bg-surface-muted/50 px-3 py-2 text-xs text-foreground/70">
+                  <div className="flex justify-between gap-3">
+                    <span>Evaporation</span>
+                    <span className="font-mono tabular-nums">
+                      {compactNumber.format(resourceUsage.evaporation_water_liters_per_year)} L/yr
+                    </span>
+                  </div>
+                  <div className="mt-1 flex justify-between gap-3">
+                    <span>Blowdown / drift</span>
+                    <span className="font-mono tabular-nums">
+                      {compactNumber.format(
+                        resourceUsage.blowdown_water_liters_per_year +
+                          resourceUsage.drift_water_liters_per_year,
+                      )}{' '}
+                      L/yr
+                    </span>
+                  </div>
+                  <div className="mt-1 flex justify-between gap-3">
+                    <span>Humidification</span>
+                    <span className="font-mono tabular-nums">
+                      {compactNumber.format(resourceUsage.humidification_water_liters_per_year)} L/yr
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="rounded-2xl border border-border bg-surface p-6 shadow-sm">
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-foreground/50">
+              Utility price impact
+            </p>
+            {priceLoading && (
+              <p className="mt-3 text-sm text-foreground/60">Estimating utility price response…</p>
+            )}
+            {priceError && (
+              <p className="mt-3 text-sm text-rose-700 dark:text-rose-300">
+                {priceError}
+              </p>
+            )}
+            {(waterPrice || electricityPrice) && !priceLoading && !priceError && (
+              <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-foreground/50">
+                    Water
+                  </p>
+                  <p className="mt-1 font-mono text-base tabular-nums text-foreground">
+                    {waterPrice ? `$${waterPrice.price_change.toFixed(4)}` : '—'}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-foreground/50">
+                    Electricity
+                  </p>
+                  <p className="mt-1 font-mono text-base tabular-nums text-foreground">
+                    {electricityPrice ? `$${electricityPrice.price_change.toFixed(4)}` : '—'}
+                  </p>
+                </div>
+                <p className="col-span-2 text-xs text-foreground/55">
+                  Baseline estimate uses the backend LA water and electricity demand tables.
+                </p>
+              </div>
             )}
           </div>
 
@@ -617,5 +902,19 @@ export default function Analysis() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function Analysis() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex flex-1 items-center justify-center text-sm text-foreground/60">
+          Loading analysis…
+        </div>
+      }
+    >
+      <AnalysisContent />
+    </Suspense>
   );
 }
